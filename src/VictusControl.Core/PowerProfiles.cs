@@ -20,21 +20,42 @@ public enum PowerProfile
     Performance,
 }
 
+public static class PowerProfileExtensions
+{
+    /// <summary>
+    /// Single rotation source: Eco -&gt; Balanced -&gt; Performance -&gt; Eco.
+    /// </summary>
+    public static PowerProfile Next(this PowerProfile profile) => profile switch
+    {
+        PowerProfile.Eco => PowerProfile.Balanced,
+        PowerProfile.Balanced => PowerProfile.Performance,
+        _ => PowerProfile.Eco,
+    };
+}
+
 /// <summary>
 /// FanMode payload codes per thermal policy.
 /// Modern (V1) covers Victus/OMEN 2022+ including board 8C9C.
 /// </summary>
 public static class FanModeCodes
 {
-    public static byte For(PowerProfile profile, ThermalPolicy policy) => (profile, policy) switch
+    public static byte For(PowerProfile profile, ThermalPolicy policy) => policy switch
     {
-        (PowerProfile.Eco, ThermalPolicy.Modern) => 0x50,
-        (PowerProfile.Balanced, ThermalPolicy.Modern) => 0x30,
-        (PowerProfile.Performance, ThermalPolicy.Modern) => 0x31,
-        (PowerProfile.Eco, _) => 0x03,
-        (PowerProfile.Balanced, _) => 0x00,
-        (PowerProfile.Performance, _) => 0x01,
-        _ => throw new ArgumentOutOfRangeException(nameof(profile)),
+        ThermalPolicy.Modern => profile switch
+        {
+            PowerProfile.Eco => 0x50,
+            PowerProfile.Balanced => 0x30,
+            PowerProfile.Performance => 0x31,
+            _ => throw new ArgumentOutOfRangeException(nameof(profile)),
+        },
+        ThermalPolicy.Legacy => profile switch
+        {
+            PowerProfile.Eco => 0x03,
+            PowerProfile.Balanced => 0x00,
+            PowerProfile.Performance => 0x01,
+            _ => throw new ArgumentOutOfRangeException(nameof(profile)),
+        },
+        _ => throw new NotSupportedException($"Unknown thermal policy 0x{(byte)policy:X2}."),
     };
 
     public static PowerProfile? Parse(byte code) => code switch
@@ -59,11 +80,22 @@ public sealed record GpuPowerData(byte CustomTgp, byte Ppab, byte DState = 0x01,
         _ => throw new ArgumentOutOfRangeException(nameof(profile)),
     };
 
+    /// <summary>
+    /// Single detection source: maps a live (cTGP, PPAB) reading to a profile.
+    /// </summary>
+    public PowerProfile ToProfile() => (CustomTgp, Ppab) switch
+    {
+        (0x01, 0x01) => PowerProfile.Performance,
+        (_, 0x01) => PowerProfile.Balanced,
+        _ => PowerProfile.Eco,
+    };
+
     public byte[] ToPayload() => [CustomTgp, Ppab, DState, PeakTemperature];
 }
 
 /// <summary>
-/// CpuPowerData payload. 0xFF leaves a limit under firmware control.
+/// CpuPowerData payload for BiosCommand 0x29. Reserved, no caller yet:
+/// the AMD test board stays on firmware auto-limits (0xFF = don't touch).
 /// </summary>
 public sealed record CpuPowerData(byte Limit1, byte Limit2, byte Limit4 = 0xFF, byte LimitWithGpu = 0xFF)
 {

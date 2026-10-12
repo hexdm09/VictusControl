@@ -5,6 +5,7 @@ namespace VictusControl.App;
 internal sealed class TrayContext : ApplicationContext
 {
     private static readonly TimeSpan KeepAliveInterval = TimeSpan.FromSeconds(75);
+    private const int CycleDebounceMs = 500;
 
     private readonly NotifyIcon _icon;
     private readonly ToolStripMenuItem _ecoItem;
@@ -13,24 +14,29 @@ internal sealed class TrayContext : ApplicationContext
     private readonly ToolStripMenuItem _autostartItem;
     private readonly ToolStripMenuItem _keepAliveItem;
     private readonly HotkeyManager _hotkeys;
-    private readonly System.Threading.Timer _keepAliveTimer;
+    private readonly System.Windows.Forms.Timer _keepAliveTimer;
+    private readonly SynchronizationContext _sync;
 
     private PowerProfile _current = PowerProfile.Balanced;
     private bool _keepAlive = true;
+    private int _busy;
+    private int _lastCycleTick;
 
     public TrayContext()
     {
+        _sync = SynchronizationContext.Current ?? new WindowsFormsSynchronizationContext();
+
         _ecoItem = new ToolStripMenuItem("ECO", null, (_, _) => Apply(PowerProfile.Eco));
         _balancedItem = new ToolStripMenuItem("Balanced", null, (_, _) => Apply(PowerProfile.Balanced));
         _perfItem = new ToolStripMenuItem("Performance", null, (_, _) => Apply(PowerProfile.Performance));
         _autostartItem = new ToolStripMenuItem("Start with Windows", null, (_, _) => ToggleAutostart())
         {
-            Checked = AutostartManager.IsEnabled(),
+            Checked = QueryAutostartSafe(),
         };
         _keepAliveItem = new ToolStripMenuItem("Keep mode alive", null, (_, _) => ToggleKeepAlive())
         {
             Checked = _keepAlive,
-            ToolTipText = "Re-apply the mode every 75s so the EC firmware cannot silently reset it.",
+            ToolTipText = $"Re-apply the mode every {KeepAliveInterval.TotalSeconds:0}s so the EC firmware cannot silently reset it.",
         };
 
         var menu = new ContextMenuStrip();
@@ -41,7 +47,12 @@ internal sealed class TrayContext : ApplicationContext
             new ToolStripSeparator(),
             new ToolStripMenuItem("Exit", null, (_, _) => ExitThread()),
         ]);
-        menu.Opening += (_, _) => RefreshState();
+        // Instant paint from the cached state; firmware truth arrives in the background.
+        menu.Opening += (_, _) =>
+        {
+            UpdateUi();
+            RefreshFromFirmwareAsync();
+        };
 
         _icon = new NotifyIcon
         {
@@ -56,74 +67,88 @@ internal sealed class TrayContext : ApplicationContext
         _hotkeys.CycleRequested += Cycle;
         _hotkeys.Start();
 
-        _keepAliveTimer = new System.Threading.Timer(_ => KeepAliveTick(), null, KeepAliveInterval, KeepAliveInterval);
+        // WinForms.Timer: ticks on the UI thread, no cross-thread UI access by design.
+        _keepAliveTimer = new System.Windows.Forms.Timer { Interval = (int)KeepAliveInterval.TotalMilliseconds };
+        _keepAliveTimer.Tick += (_, _) =>
+        {
+            if (_keepAlive)
+                Apply(_current, silent: true);
+        };
+        _keepAliveTimer.Start();
 
-        RefreshState();
+        UpdateUi();
+        RefreshFromFirmwareAsync();
     }
 
-    private void RefreshState()
+    /// <summary>
+    /// Paints menu + icon from the cached profile. No WMI, safe to call anywhere on the UI thread.
+    /// </summary>
+    private void UpdateUi()
     {
-        try
-        {
-            using var client = new HpWmiClient();
-            var controller = new PowerController(client);
-            GpuPowerData gpu = controller.GetGpuPower();
-            _current = (gpu.CustomTgp, gpu.Ppab) switch
-            {
-                (0x01, 0x01) => PowerProfile.Performance,
-                (_, 0x01) => PowerProfile.Balanced,
-                _ => PowerProfile.Eco,
-            };
-        }
-        catch
-        {
-            // Keep the last known state if WMI is momentarily unavailable.
-        }
-
         _ecoItem.Checked = _current == PowerProfile.Eco;
         _balancedItem.Checked = _current == PowerProfile.Balanced;
         _perfItem.Checked = _current == PowerProfile.Performance;
-        _icon.Icon = _current switch
-        {
-            PowerProfile.Eco => ProfileIcons.Eco,
-            PowerProfile.Performance => ProfileIcons.Performance,
-            _ => ProfileIcons.Balanced,
-        };
+        _icon.Icon = ProfileIcons.IconFor(_current);
         _icon.Text = $"VictusControl — {_current}";
+    }
+
+    /// <summary>
+    /// Reconciles the cached profile with firmware truth off the UI thread,
+    /// then repaints. Never blocks menu opening.
+    /// </summary>
+    private void RefreshFromFirmwareAsync()
+    {
+        Task.Run(() =>
+        {
+            try
+            {
+                using var client = new HpWmiClient();
+                PowerProfile actual = new PowerController(client).GetGpuPower().ToProfile();
+                _sync.Post(_ =>
+                {
+                    _current = actual;
+                    UpdateUi();
+                }, null);
+            }
+            catch
+            {
+                // Keep the last known state if WMI is momentarily unavailable.
+            }
+        });
     }
 
     private void Apply(PowerProfile profile, bool silent = false)
     {
+        // Serializes keep-alive ticks against manual/hotkey switches.
+        if (Interlocked.Exchange(ref _busy, 1) != 0)
+            return;
         try
         {
             using var client = new HpWmiClient();
             new PowerController(client).ApplyProfile(profile);
             _current = profile;
-            RefreshState();
+            UpdateUi();
             if (!silent)
-                OsdForm.ShowToast(Label(profile), Accent(profile));
+                OsdForm.ShowToast(Label(profile), profile);
         }
         catch (Exception ex)
         {
             MessageBox.Show(ex.Message, "VictusControl", MessageBoxButtons.OK, MessageBoxIcon.Error);
         }
+        finally
+        {
+            Interlocked.Exchange(ref _busy, 0);
+        }
     }
 
     private void Cycle()
     {
-        PowerProfile next = _current switch
-        {
-            PowerProfile.Eco => PowerProfile.Balanced,
-            PowerProfile.Balanced => PowerProfile.Performance,
-            _ => PowerProfile.Eco,
-        };
-        Apply(next);
-    }
-
-    private void KeepAliveTick()
-    {
-        if (_keepAlive)
-            Apply(_current, silent: true);
+        // One switch per 500ms: a single Cycle is ~5 WMI calls + verify, don't queue them.
+        int now = Environment.TickCount;
+        if (now - _lastCycleTick < CycleDebounceMs)
+            return;
+        _lastCycleTick = now;
+        Apply(_current.Next());
     }
 
     private void ToggleAutostart()
@@ -134,11 +159,24 @@ internal sealed class TrayContext : ApplicationContext
                 AutostartManager.Disable();
             else
                 AutostartManager.Enable(Application.ExecutablePath);
-            _autostartItem.Checked = AutostartManager.IsEnabled();
+            _autostartItem.Checked = QueryAutostartSafe();
         }
         catch (Exception ex)
         {
             MessageBox.Show(ex.Message, "VictusControl", MessageBoxButtons.OK, MessageBoxIcon.Error);
+        }
+    }
+
+    private static bool QueryAutostartSafe()
+    {
+        try
+        {
+            return AutostartManager.IsEnabled();
+        }
+        catch
+        {
+            // A hung schtasks must never kill the tray at startup.
+            return false;
         }
     }
 
@@ -149,13 +187,6 @@ internal sealed class TrayContext : ApplicationContext
         PowerProfile.Eco => "ECO mode",
         PowerProfile.Performance => "Performance mode",
         _ => "Balanced mode",
-    };
-
-    private static Color Accent(PowerProfile profile) => profile switch
-    {
-        PowerProfile.Eco => Color.LimeGreen,
-        PowerProfile.Performance => Color.OrangeRed,
-        _ => Color.DodgerBlue,
     };
 
     protected override void Dispose(bool disposing)

@@ -51,7 +51,10 @@ internal sealed class HotkeyManager : IDisposable
     {
         try
         {
-            uint id = Convert.ToUInt32(e.NewEvent["eventId"]);
+            object? raw = e.NewEvent?["eventId"];
+            if (raw is null)
+                return;
+            uint id = Convert.ToUInt32(raw);
             if (id is EventFnP or EventOmenKey)
                 RaiseCycle();
         }
@@ -89,11 +92,20 @@ internal sealed class HotkeyManager : IDisposable
         _disposed = true;
         if (_wmiWatcher is not null)
         {
-            _wmiWatcher.EventArrived -= OnWmiEvent;
-            _wmiWatcher.Stop();
+            try
+            {
+                _wmiWatcher.EventArrived -= OnWmiEvent;
+                _wmiWatcher.Stop();
+            }
+            catch
+            {
+                // Watcher never started; still dispose the fallback below.
+            }
             _wmiWatcher.Dispose();
+            _wmiWatcher = null;
         }
         _fallbackWindow?.Dispose();
+        _fallbackWindow = null;
     }
 
     private sealed class HotkeyWindow : NativeWindow, IDisposable

@@ -31,22 +31,14 @@ try
             break;
         }
         case "--get":
-            Console.WriteLine($"Profile: {CurrentProfileName()}");
+            Console.WriteLine($"Profile: {Describe(ReadGpu())}");
             break;
         case "--set" when args.Length > 1:
             ApplyProfile(Parse(args[1]));
             break;
         case "--cycle":
-        {
-            PowerProfile next = CurrentProfile() switch
-            {
-                PowerProfile.Eco => PowerProfile.Balanced,
-                PowerProfile.Balanced => PowerProfile.Performance,
-                _ => PowerProfile.Eco,
-            };
-            ApplyProfile(next);
+            ApplyProfile(CurrentProfile().Next());
             break;
-        }
         case "--autostart" when args.Length > 1:
         {
             if (args[1].Equals("on", StringComparison.OrdinalIgnoreCase))
@@ -89,34 +81,21 @@ static PowerProfile Parse(string name) => name.ToLowerInvariant() switch
     _ => throw new ArgumentException($"Unknown profile '{name}'. Use eco|balanced|perf."),
 };
 
-static PowerProfile CurrentProfile()
+static GpuPowerData ReadGpu()
 {
     using var client = new HpWmiClient();
-    GpuPowerData gpu = new PowerController(client).GetGpuPower();
-    return (gpu.CustomTgp, gpu.Ppab) switch
-    {
-        (0x01, 0x01) => PowerProfile.Performance,
-        (_, 0x01) => PowerProfile.Balanced,
-        _ => PowerProfile.Eco,
-    };
+    return new PowerController(client).GetGpuPower();
 }
 
-static string CurrentProfileName()
-{
-    using var client = new HpWmiClient();
-    GpuPowerData gpu = new PowerController(client).GetGpuPower();
-    string mode = (gpu.CustomTgp, gpu.Ppab) switch
-    {
-        (0x01, 0x01) => "Performance",
-        (_, 0x01) => "Balanced",
-        _ => "Eco",
-    };
-    return $"{mode} (cTGP={gpu.CustomTgp} PPAB={gpu.Ppab})";
-}
+static PowerProfile CurrentProfile() => ReadGpu().ToProfile();
+
+static string Describe(GpuPowerData gpu) =>
+    $"{gpu.ToProfile()} (cTGP={gpu.CustomTgp} PPAB={gpu.Ppab})";
 
 static void ApplyProfile(PowerProfile profile)
 {
     using var client = new HpWmiClient();
-    new PowerController(client).ApplyProfile(profile);
+    var controller = new PowerController(client);
+    controller.ApplyProfile(profile);
     Console.WriteLine($"Applied: {profile}");
 }

@@ -1,14 +1,21 @@
+using VictusControl.Core;
+
 namespace VictusControl.App;
 
 /// <summary>
-/// Borderless top-center toast shown for ~1.2s on profile switch.
-/// Never steals focus (NOACTIVATE).
+/// Borderless top-center toast shown ~1.2s on profile switch.
+/// Modeless singleton: rapid switches replace the toast instead of
+/// stacking nested message loops. Never steals focus (NOACTIVATE).
 /// </summary>
 internal sealed class OsdForm : Form
 {
+    private const int DisplayMs = 1200;
+
+    private static OsdForm? _active;
+
     private readonly System.Windows.Forms.Timer _closeTimer;
 
-    public OsdForm(string text, Color accent)
+    private OsdForm(string text, Color accent)
     {
         FormBorderStyle = FormBorderStyle.None;
         ShowInTaskbar = false;
@@ -46,7 +53,7 @@ internal sealed class OsdForm : Form
             Location = new Point(area.X + ((area.Width - Width) / 2), area.Y + 90);
         };
 
-        _closeTimer = new System.Windows.Forms.Timer { Interval = 1200 };
+        _closeTimer = new System.Windows.Forms.Timer { Interval = DisplayMs };
         _closeTimer.Tick += (_, _) => Close();
     }
 
@@ -76,9 +83,11 @@ internal sealed class OsdForm : Form
         base.Dispose(disposing);
     }
 
-    public static void ShowToast(string text, Color accent)
+    public static void ShowToast(string text, PowerProfile profile)
     {
-        using var form = new OsdForm(text, accent);
-        form.ShowDialog();
+        _active?.Close();
+        _active = new OsdForm(text, ProfileIcons.AccentFor(profile));
+        _active.FormClosed += (_, _) => _active = null;
+        _active.Show();
     }
 }

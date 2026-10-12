@@ -11,37 +11,89 @@ public static class AutostartManager
 {
     public const string TaskName = "VictusControl";
 
+    private static readonly TimeSpan QueryTimeout = TimeSpan.FromSeconds(10);
+    private static readonly TimeSpan ChangeTimeout = TimeSpan.FromSeconds(15);
+
+    private static string SchTasksPath => Path.Combine(Environment.SystemDirectory, "schtasks.exe");
+
     public static bool IsEnabled()
     {
-        using var process = Run("schtasks", $"/Query /TN \"{TaskName}\"");
-        process.WaitForExit(10_000);
+        using var process = Run($"/Query /TN \"{TaskName}\"");
+        if (!process.WaitForExit(QueryTimeout))
+        {
+            Kill(process);
+            throw new TimeoutException("schtasks /Query timed out.");
+        }
         return process.ExitCode == 0;
     }
 
     public static void Enable(string exePath)
     {
-        using var process = Run("schtasks",
-            $"/Create /TN \"{TaskName}\" /TR \"\\\"{exePath}\\\"\" /SC ONLOGON /RL HIGHEST /F");
-        process.WaitForExit(15_000);
+        string full = ValidateExePath(exePath);
+        using var process = Run($"/Create /TN \"{TaskName}\" /TR \"\\\"{full}\\\"\" /SC ONLOGON /RL HIGHEST /F");
+        if (!process.WaitForExit(ChangeTimeout))
+        {
+            Kill(process);
+            throw new TimeoutException("schtasks /Create timed out.");
+        }
         if (process.ExitCode != 0)
-            throw new InvalidOperationException("Failed to register the autostart task (schtasks exit code " + process.ExitCode + ").");
+            throw new InvalidOperationException($"Failed to register the autostart task (schtasks exit code {process.ExitCode}).");
     }
 
     public static void Disable()
     {
-        using var process = Run("schtasks", $"/Delete /TN \"{TaskName}\" /F");
-        process.WaitForExit(15_000);
+        using var process = Run($"/Delete /TN \"{TaskName}\" /F");
+        if (!process.WaitForExit(ChangeTimeout))
+        {
+            Kill(process);
+            throw new TimeoutException("schtasks /Delete timed out.");
+        }
+        // Exit code 1 = task did not exist: already in the desired state.
+        if (process.ExitCode is not (0 or 1))
+            throw new InvalidOperationException($"Failed to remove the autostart task (schtasks exit code {process.ExitCode}).");
     }
 
-    private static Process Run(string file, string args)
+    /// <summary>
+    /// Rejects quote-breaking and relative paths: a crafted /TR tail would be
+    /// parsed as extra schtasks switches, and a relative path is a hijack risk at logon.
+    /// </summary>
+    internal static string ValidateExePath(string exePath)
+    {
+        if (string.IsNullOrWhiteSpace(exePath))
+            throw new ArgumentException("Executable path is empty.", nameof(exePath));
+        if (exePath.Contains('"'))
+            throw new ArgumentException("Executable path must not contain quotes.", nameof(exePath));
+        string full = Path.GetFullPath(exePath);
+        if (!Path.IsPathRooted(full))
+            throw new ArgumentException("Executable path must be absolute.", nameof(exePath));
+        if (!full.EndsWith(".exe", StringComparison.OrdinalIgnoreCase))
+            throw new ArgumentException("Executable path must point to an .exe file.", nameof(exePath));
+        if (!File.Exists(full))
+            throw new FileNotFoundException("Executable not found.", full);
+        return full;
+    }
+
+    private static Process Run(string args)
     {
         return Process.Start(new ProcessStartInfo
         {
-            FileName = file,
+            FileName = SchTasksPath,
             Arguments = args,
             CreateNoWindow = true,
             UseShellExecute = false,
             WindowStyle = ProcessWindowStyle.Hidden,
-        }) ?? throw new InvalidOperationException($"Failed to start {file}.");
+        }) ?? throw new InvalidOperationException($"Failed to start {SchTasksPath}.");
+    }
+
+    private static void Kill(Process process)
+    {
+        try
+        {
+            process.Kill(entireProcessTree: true);
+        }
+        catch
+        {
+            // Best effort: the process may already be gone.
+        }
     }
 }

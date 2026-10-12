@@ -1,0 +1,6 @@
+<Project>
+  <PropertyGroup>
+    <!-- Pinned: 'latest' would silently adopt new language versions on SDK updates. -->
+    <LangVersion>13</LangVersion>
+  </PropertyGroup>
+</Project>

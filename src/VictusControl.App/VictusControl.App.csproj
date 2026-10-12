@@ -5,7 +5,6 @@
     <TargetFramework>net9.0-windows</TargetFramework>
     <Nullable>enable</Nullable>
     <ImplicitUsings>enable</ImplicitUsings>
-    <LangVersion>latest</LangVersion>
     <EnableWindowsTargeting>true</EnableWindowsTargeting>
     <UseWindowsForms>true</UseWindowsForms>
     <AssemblyName>VictusControlTray</AssemblyName>
@@ -16,7 +15,8 @@
   </PropertyGroup>
 
   <ItemGroup>
-    <PackageReference Include="Microsoft.Management.Infrastructure" Version="2.0.0" />
+    <!-- System.Management: only for the hpqBEvnt watcher (Fn+P / OMEN key).
+         WMI calls themselves stay on Microsoft.Management.Infrastructure via Core. -->
     <PackageReference Include="System.Management" Version="9.0.0" />
   </ItemGroup>
 

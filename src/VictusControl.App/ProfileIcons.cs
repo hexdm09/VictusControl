@@ -1,8 +1,10 @@
+using VictusControl.Core;
+
 namespace VictusControl.App;
 
 /// <summary>
 /// Runtime-generated tray icons: green = Eco, blue = Balanced, red = Performance.
-/// No external assets needed.
+/// No external assets needed. Single source for profile colors.
 /// </summary>
 internal static class ProfileIcons
 {
@@ -10,6 +12,20 @@ internal static class ProfileIcons
     public static Icon Balanced { get; } = Make(Color.DodgerBlue);
     public static Icon Performance { get; } = Make(Color.OrangeRed);
     public static Icon Idle { get; } = Make(Color.Gray);
+
+    public static Icon IconFor(PowerProfile profile) => profile switch
+    {
+        PowerProfile.Eco => Eco,
+        PowerProfile.Performance => Performance,
+        _ => Balanced,
+    };
+
+    public static Color AccentFor(PowerProfile profile) => profile switch
+    {
+        PowerProfile.Eco => Color.LimeGreen,
+        PowerProfile.Performance => Color.OrangeRed,
+        _ => Color.DodgerBlue,
+    };
 
     private static Icon Make(Color color)
     {
