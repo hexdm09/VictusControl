@@ -34,6 +34,7 @@ public static class AutostartManager
         }
         if (process.ExitCode != 0)
             throw new InvalidOperationException($"Failed to register the autostart task (schtasks exit code {process.ExitCode}).");
+        ApplyBatteryPolicy();
     }
 
     public static void Disable()
@@ -64,6 +65,58 @@ public static class AutostartManager
         if (!File.Exists(full))
             throw new FileNotFoundException("Executable not found.", full);
         return full;
+    }
+
+    // schtasks has no switch for battery policy, so patch the exported xml:
+    // a laptop booting on battery would otherwise skip the logon task.
+    private static void ApplyBatteryPolicy()
+    {
+        string xml = QueryXml();
+        string patched = xml
+            .Replace("<DisallowStartIfOnBatteries>true</DisallowStartIfOnBatteries>",
+                "<DisallowStartIfOnBatteries>false</DisallowStartIfOnBatteries>")
+            .Replace("<StopIfGoingOnBatteries>true</StopIfGoingOnBatteries>",
+                "<StopIfGoingOnBatteries>false</StopIfGoingOnBatteries>");
+        if (patched == xml)
+            return;
+        string file = Path.Combine(Path.GetTempPath(), TaskName + ".xml");
+        File.WriteAllText(file, patched);
+        try
+        {
+            using var process = Run($"/Create /TN \"{TaskName}\" /XML \"{file}\" /F");
+            if (!process.WaitForExit(ChangeTimeout))
+            {
+                Kill(process);
+                throw new TimeoutException("schtasks /Create /XML timed out.");
+            }
+            if (process.ExitCode != 0)
+                throw new InvalidOperationException($"Failed to apply battery policy (schtasks exit code {process.ExitCode}).");
+        }
+        finally
+        {
+            try { File.Delete(file); } catch { }
+        }
+    }
+
+    private static string QueryXml()
+    {
+        using var process = Process.Start(new ProcessStartInfo
+        {
+            FileName = SchTasksPath,
+            Arguments = $"/Query /TN \"{TaskName}\" /XML",
+            CreateNoWindow = true,
+            UseShellExecute = false,
+            RedirectStandardOutput = true,
+        }) ?? throw new InvalidOperationException($"Failed to start {SchTasksPath}.");
+        string output = process.StandardOutput.ReadToEnd();
+        if (!process.WaitForExit(QueryTimeout))
+        {
+            Kill(process);
+            throw new TimeoutException("schtasks /Query /XML timed out.");
+        }
+        if (process.ExitCode != 0)
+            throw new InvalidOperationException($"Failed to export task xml (schtasks exit code {process.ExitCode}).");
+        return output;
     }
 
     private static Process Run(string args)

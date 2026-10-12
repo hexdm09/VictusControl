@@ -111,25 +111,43 @@ internal sealed class TrayContext : ApplicationContext
 
     private void Apply(PowerProfile profile, bool silent = false)
     {
+        // Serializes keep-alive ticks against manual/hotkey switches.
         if (Interlocked.Exchange(ref _busy, 1) != 0)
             return;
-        try
+        Task.Run(() =>
         {
-            using var client = new HpWmiClient();
-            new PowerController(client).ApplyProfile(profile);
-            _current = profile;
-            UpdateUi();
-            if (!silent)
-                OsdForm.ShowToast(Label(profile), profile);
-        }
-        catch (Exception ex)
-        {
-            MessageBox.Show(ex.Message, "VictusControl", MessageBoxButtons.OK, MessageBoxIcon.Error);
-        }
-        finally
-        {
-            Interlocked.Exchange(ref _busy, 0);
-        }
+            Exception? error = null;
+            try
+            {
+                using var client = new HpWmiClient();
+                new PowerController(client).ApplyProfile(profile);
+            }
+            catch (Exception ex)
+            {
+                error = ex;
+            }
+            _sync.Post(_ =>
+            {
+                try
+                {
+                    if (error is null)
+                    {
+                        _current = profile;
+                        UpdateUi();
+                        if (!silent)
+                            OsdForm.ShowToast(Label(profile), profile);
+                    }
+                    else
+                    {
+                        MessageBox.Show(error.Message, "VictusControl", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                    }
+                }
+                finally
+                {
+                    Interlocked.Exchange(ref _busy, 0);
+                }
+            }, null);
+        });
     }
 
     private void Cycle()

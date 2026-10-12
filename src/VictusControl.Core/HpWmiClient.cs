@@ -89,12 +89,15 @@ public sealed class HpWmiClient : IDisposable
 
         using var result = _session.InvokeMethod(_methodInstance, $"hpqBIOSInt{responseSize}", parameters);
 
-        if (result.OutParameters["OutData"].Value is CimInstance outData)
+        if (result.OutParameters["OutData"].Value is CimInstance raw)
         {
-            response = responseSize > 0
-                ? outData.CimInstanceProperties["Data"]?.Value as byte[]
-                : null;
-            return Convert.ToInt32(outData.CimInstanceProperties["rwReturnCode"]?.Value ?? BiosReturnCode.WmiError);
+            using (raw)
+            {
+                response = responseSize > 0
+                    ? raw.CimInstanceProperties["Data"]?.Value as byte[]
+                    : null;
+                return Convert.ToInt32(raw.CimInstanceProperties["rwReturnCode"]?.Value ?? BiosReturnCode.WmiError);
+            }
         }
 
         response = null;
