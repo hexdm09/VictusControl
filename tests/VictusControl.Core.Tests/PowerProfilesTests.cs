@@ -3,10 +3,6 @@ using Xunit;
 
 namespace VictusControl.Core.Tests;
 
-/// <summary>
-/// Hardware-free tests for the pure mapping logic.
-/// Any change to the firmware code tables must break these first.
-/// </summary>
 public sealed class PowerProfilesTests
 {
     [Theory]

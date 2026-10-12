@@ -2,11 +2,7 @@ using System.Diagnostics;
 
 namespace VictusControl.Core;
 
-/// <summary>
-/// Autostart via Windows Task Scheduler (logon trigger, HighestAvailable).
-/// Uses schtasks.exe so no extra dependencies are needed.
-/// Elevated rights are required to register the task (the tray app already runs elevated).
-/// </summary>
+// registers elevated task on logon via schtasks.exe
 public static class AutostartManager
 {
     public const string TaskName = "VictusControl";
@@ -48,15 +44,12 @@ public static class AutostartManager
             Kill(process);
             throw new TimeoutException("schtasks /Delete timed out.");
         }
-        // Exit code 1 = task did not exist: already in the desired state.
+        // exit code 1 means task was already absent
         if (process.ExitCode is not (0 or 1))
             throw new InvalidOperationException($"Failed to remove the autostart task (schtasks exit code {process.ExitCode}).");
     }
 
-    /// <summary>
-    /// Rejects quote-breaking and relative paths: a crafted /TR tail would be
-    /// parsed as extra schtasks switches, and a relative path is a hijack risk at logon.
-    /// </summary>
+    // rejects relative paths and embedded quotes
     internal static string ValidateExePath(string exePath)
     {
         if (string.IsNullOrWhiteSpace(exePath))

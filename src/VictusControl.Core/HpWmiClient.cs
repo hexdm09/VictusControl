@@ -2,31 +2,22 @@ using Microsoft.Management.Infrastructure;
 
 namespace VictusControl.Core;
 
-/// <summary>
-/// Sub-command ids of the HP gaming WMI module (Command = 0x20008).
-/// Values established from public protocol documentation and on-device dumps.
-/// </summary>
 public enum BiosCommand : uint
 {
-    // Used by PowerController:
     FanMode = 0x1A,
     GpuRead = 0x21,
     GpuWrite = 0x22,
     SystemRead = 0x28,
 
-    // Documented protocol map, no caller yet (kept for reference):
+    // protocol map entries reserved for future use
     FanCount = 0x10,
     TempRead = 0x23,
     MaxFanRead = 0x26,
     MaxFanWrite = 0x27,
-    CpuWrite = 0x29, // reserved: AMD test board stays on firmware auto-limits
+    CpuWrite = 0x29,
 }
 
-/// <summary>
-/// Clean-room CIM client for the HP BIOS WMI interface.
-/// Talks to ACPI\PNP0C14 via root\wmi, no kernel drivers involved
-/// (required for Windows 11 with Memory Integrity / HVCI enabled).
-/// </summary>
+// talks to ACPI\PNP0C14 via root\wmi without kernel drivers (passes Windows 11 HVCI)
 public sealed class HpWmiClient : IDisposable
 {
     private const string Namespace = @"root\wmi";
@@ -42,10 +33,10 @@ public sealed class HpWmiClient : IDisposable
 
     public HpWmiClient()
     {
-        CimSession session = CimSession.Create(null);
+        var session = CimSession.Create(null);
         try
         {
-            CimClass dataClass = session.GetClass(Namespace, DataClass);
+            var dataClass = session.GetClass(Namespace, DataClass);
             try
             {
                 _methodInstance = session

@@ -2,8 +2,7 @@ namespace VictusControl.App;
 
 internal static class Program
 {
-    // Global\ = one instance per machine. The app is admin-only, so a
-    // low-privilege pre-created mutex (squat attack) is out of scope.
+    // machine-wide single-instance mutex
     private const string MutexName = @"Global\VictusControl";
 
     [STAThread]
@@ -17,14 +16,13 @@ internal static class Program
         }
         catch (AbandonedMutexException)
         {
-            // Previous owner died without releasing; we acquired it.
             owned = true;
         }
 
         if (!owned)
         {
             mutex.Dispose();
-            return; // Another instance is already running.
+            return;
         }
 
         using (mutex)

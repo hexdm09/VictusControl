@@ -3,11 +3,7 @@ using System.Runtime.InteropServices;
 
 namespace VictusControl.App;
 
-/// <summary>
-/// Listens for the hardware Fn+P / OMEN-key presses via WMI events (hpqBEvnt),
-/// with a global Ctrl+Shift+P hotkey as fallback (e.g. capped services disabled).
-/// All callbacks are marshalled back to the UI thread.
-/// </summary>
+// listens for hardware Fn+P / OMEN key via hpqBEvnt, Ctrl+Shift+P fallback
 internal sealed class HotkeyManager : IDisposable
 {
     private const uint EventFnP = 27; // 0x1B HPWMI_FN_P_HOTKEY

@@ -2,11 +2,7 @@ using VictusControl.Core;
 
 namespace VictusControl.App;
 
-/// <summary>
-/// Borderless top-center toast shown ~1.2s on profile switch.
-/// Modeless singleton: rapid switches replace the toast instead of
-/// stacking nested message loops. Never steals focus (NOACTIVATE).
-/// </summary>
+// top-center non-activating overlay toast shown on profile switch
 internal sealed class OsdForm : Form
 {
     private const int DisplayMs = 1200;

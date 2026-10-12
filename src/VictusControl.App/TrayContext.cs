@@ -47,7 +47,6 @@ internal sealed class TrayContext : ApplicationContext
             new ToolStripSeparator(),
             new ToolStripMenuItem("Exit", null, (_, _) => ExitThread()),
         ]);
-        // Instant paint from the cached state; firmware truth arrives in the background.
         menu.Opening += (_, _) =>
         {
             UpdateUi();
@@ -67,7 +66,7 @@ internal sealed class TrayContext : ApplicationContext
         _hotkeys.CycleRequested += Cycle;
         _hotkeys.Start();
 
-        // WinForms.Timer: ticks on the UI thread, no cross-thread UI access by design.
+        // 75s tick: prevent ec from silently resetting custom fan profile
         _keepAliveTimer = new System.Windows.Forms.Timer { Interval = (int)KeepAliveInterval.TotalMilliseconds };
         _keepAliveTimer.Tick += (_, _) =>
         {
@@ -80,22 +79,15 @@ internal sealed class TrayContext : ApplicationContext
         RefreshFromFirmwareAsync();
     }
 
-    /// <summary>
-    /// Paints menu + icon from the cached profile. No WMI, safe to call anywhere on the UI thread.
-    /// </summary>
     private void UpdateUi()
     {
         _ecoItem.Checked = _current == PowerProfile.Eco;
         _balancedItem.Checked = _current == PowerProfile.Balanced;
         _perfItem.Checked = _current == PowerProfile.Performance;
         _icon.Icon = ProfileIcons.IconFor(_current);
-        _icon.Text = $"VictusControl — {_current}";
+        _icon.Text = $"VictusControl: {_current}";
     }
 
-    /// <summary>
-    /// Reconciles the cached profile with firmware truth off the UI thread,
-    /// then repaints. Never blocks menu opening.
-    /// </summary>
     private void RefreshFromFirmwareAsync()
     {
         Task.Run(() =>
@@ -112,14 +104,13 @@ internal sealed class TrayContext : ApplicationContext
             }
             catch
             {
-                // Keep the last known state if WMI is momentarily unavailable.
+                // wmi temporarily busy; keep cached state
             }
         });
     }
 
     private void Apply(PowerProfile profile, bool silent = false)
     {
-        // Serializes keep-alive ticks against manual/hotkey switches.
         if (Interlocked.Exchange(ref _busy, 1) != 0)
             return;
         try
@@ -143,7 +134,6 @@ internal sealed class TrayContext : ApplicationContext
 
     private void Cycle()
     {
-        // One switch per 500ms: a single Cycle is ~5 WMI calls + verify, don't queue them.
         int now = Environment.TickCount;
         if (now - _lastCycleTick < CycleDebounceMs)
             return;

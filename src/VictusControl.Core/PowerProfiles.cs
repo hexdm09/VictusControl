@@ -1,18 +1,12 @@
 namespace VictusControl.Core;
 
-/// <summary>
-/// Thermal policy revision reported by the board (SystemData byte 3).
-/// Selects which FanMode code table the firmware understands.
-/// </summary>
+// thermal policy reported by board (SystemData byte 3)
 public enum ThermalPolicy : byte
 {
     Legacy = 0x00,
     Modern = 0x01,
 }
 
-/// <summary>
-/// The three user-facing power profiles.
-/// </summary>
 public enum PowerProfile
 {
     Eco,
@@ -22,9 +16,7 @@ public enum PowerProfile
 
 public static class PowerProfileExtensions
 {
-    /// <summary>
-    /// Single rotation source: Eco -&gt; Balanced -&gt; Performance -&gt; Eco.
-    /// </summary>
+    // Eco -> Balanced -> Performance -> Eco
     public static PowerProfile Next(this PowerProfile profile) => profile switch
     {
         PowerProfile.Eco => PowerProfile.Balanced,
@@ -33,10 +25,7 @@ public static class PowerProfileExtensions
     };
 }
 
-/// <summary>
-/// FanMode payload codes per thermal policy.
-/// Modern (V1) covers Victus/OMEN 2022+ including board 8C9C.
-/// </summary>
+// 0x1A fan mode codes per thermal policy
 public static class FanModeCodes
 {
     public static byte For(PowerProfile profile, ThermalPolicy policy) => policy switch
@@ -67,9 +56,7 @@ public static class FanModeCodes
     };
 }
 
-/// <summary>
-/// GpuPowerData payload (cTGP / PPAB Dynamic Boost / DState).
-/// </summary>
+// cTGP / PPAB dynamic boost payload
 public sealed record GpuPowerData(byte CustomTgp, byte Ppab, byte DState = 0x01, byte PeakTemperature = 0x00)
 {
     public static GpuPowerData For(PowerProfile profile) => profile switch
@@ -80,9 +67,6 @@ public sealed record GpuPowerData(byte CustomTgp, byte Ppab, byte DState = 0x01,
         _ => throw new ArgumentOutOfRangeException(nameof(profile)),
     };
 
-    /// <summary>
-    /// Single detection source: maps a live (cTGP, PPAB) reading to a profile.
-    /// </summary>
     public PowerProfile ToProfile() => (CustomTgp, Ppab) switch
     {
         (0x01, 0x01) => PowerProfile.Performance,
@@ -93,10 +77,7 @@ public sealed record GpuPowerData(byte CustomTgp, byte Ppab, byte DState = 0x01,
     public byte[] ToPayload() => [CustomTgp, Ppab, DState, PeakTemperature];
 }
 
-/// <summary>
-/// CpuPowerData payload for BiosCommand 0x29. Reserved, no caller yet:
-/// the AMD test board stays on firmware auto-limits (0xFF = don't touch).
-/// </summary>
+// payload for BiosCommand 0x29 (AMD boards use firmware auto limits by default)
 public sealed record CpuPowerData(byte Limit1, byte Limit2, byte Limit4 = 0xFF, byte LimitWithGpu = 0xFF)
 {
     public byte[] ToPayload() => [Limit1, Limit2, Limit4, LimitWithGpu];

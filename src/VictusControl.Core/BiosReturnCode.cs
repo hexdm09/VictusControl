@@ -1,8 +1,6 @@
 namespace VictusControl.Core;
 
-/// <summary>
-/// BIOS return codes (rwReturnCode).
-/// </summary>
+// rwReturnCode values returned by hpqBDataOut
 public static class BiosReturnCode
 {
     public const int Ok = 0;
