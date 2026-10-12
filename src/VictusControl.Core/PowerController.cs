@@ -8,9 +8,9 @@ public sealed class PowerController
     // firmware expects a 4-byte placeholder even on reads
     private static readonly byte[] GpuReadRequest = [0x00, 0x00, 0x00, 0x00];
 
-    private readonly HpWmiClient _client;
+    private readonly IHpWmiClient _client;
 
-    public PowerController(HpWmiClient client)
+    public PowerController(IHpWmiClient client)
     {
         _client = client ?? throw new ArgumentNullException(nameof(client));
     }

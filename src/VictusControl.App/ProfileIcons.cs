@@ -34,6 +34,19 @@ internal static class ProfileIcons
             using var brush = new SolidBrush(color);
             graphics.FillEllipse(brush, 1, 1, 14, 14);
         }
-        return Icon.FromHandle(bitmap.GetHicon());
+        // FromHandle does not own the native handle: clone into managed memory, then free it
+        nint native = bitmap.GetHicon();
+        try
+        {
+            using var owned = Icon.FromHandle(native);
+            return (Icon)owned.Clone();
+        }
+        finally
+        {
+            DestroyIcon(native);
+        }
     }
+
+    [System.Runtime.InteropServices.DllImport("user32.dll")]
+    private static extern bool DestroyIcon(nint hIcon);
 }

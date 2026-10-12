@@ -57,9 +57,9 @@ public static class AutostartManager
             throw new ArgumentException("Executable path is empty.", nameof(exePath));
         if (exePath.Contains('"'))
             throw new ArgumentException("Executable path must not contain quotes.", nameof(exePath));
-        string full = Path.GetFullPath(exePath);
-        if (!Path.IsPathRooted(full))
+        if (!Path.IsPathRooted(exePath))
             throw new ArgumentException("Executable path must be absolute.", nameof(exePath));
+        string full = Path.GetFullPath(exePath);
         if (!full.EndsWith(".exe", StringComparison.OrdinalIgnoreCase))
             throw new ArgumentException("Executable path must point to an .exe file.", nameof(exePath));
         if (!File.Exists(full))
@@ -79,8 +79,13 @@ public static class AutostartManager
                 "<StopIfGoingOnBatteries>false</StopIfGoingOnBatteries>");
         if (patched == xml)
             return;
-        string file = Path.Combine(Path.GetTempPath(), TaskName + ".xml");
-        File.WriteAllText(file, patched);
+        // random name: predictable %TEMP% file under an elevated process is a squat risk
+        string file = Path.Combine(Path.GetTempPath(), $"VictusControl_{Path.GetRandomFileName()}.xml");
+        using (var stream = new FileStream(file, FileMode.CreateNew, FileAccess.Write))
+        using (var writer = new StreamWriter(stream))
+        {
+            writer.Write(patched);
+        }
         try
         {
             using var process = Run($"/Create /TN \"{TaskName}\" /XML \"{file}\" /F");

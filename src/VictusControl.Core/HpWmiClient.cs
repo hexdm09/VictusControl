@@ -18,7 +18,7 @@ public enum BiosCommand : uint
 }
 
 // talks to ACPI\PNP0C14 via root\wmi without kernel drivers (passes Windows 11 HVCI)
-public sealed class HpWmiClient : IDisposable
+public sealed class HpWmiClient : IHpWmiClient
 {
     private const string Namespace = @"root\wmi";
     private const string MethodClass = "hpqBIntM";

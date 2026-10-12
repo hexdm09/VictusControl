@@ -5,6 +5,7 @@ namespace VictusControl.App;
 internal sealed class TrayContext : ApplicationContext
 {
     private static readonly TimeSpan KeepAliveInterval = TimeSpan.FromSeconds(75);
+    private static readonly TimeSpan ApplyTimeout = TimeSpan.FromSeconds(10);
     private const int CycleDebounceMs = 500;
 
     private readonly NotifyIcon _icon;
@@ -19,8 +20,14 @@ internal sealed class TrayContext : ApplicationContext
 
     private PowerProfile _current = PowerProfile.Balanced;
     private bool _keepAlive = true;
-    private int _busy;
     private int _lastCycleTick;
+
+    // coalescing queue: latest request wins, nothing is silently dropped
+    private readonly object _queueLock = new();
+    private PowerProfile? _pending;
+    private bool _pendingSilent;
+    private int _pumping;
+    private long _seq;
 
     public TrayContext()
     {
@@ -90,6 +97,7 @@ internal sealed class TrayContext : ApplicationContext
 
     private void RefreshFromFirmwareAsync()
     {
+        long ticket = Interlocked.Read(ref _seq);
         Task.Run(() =>
         {
             try
@@ -98,6 +106,9 @@ internal sealed class TrayContext : ApplicationContext
                 PowerProfile actual = new PowerController(client).GetGpuPower().ToProfile();
                 _sync.Post(_ =>
                 {
+                    // a newer Apply finished while we were reading: stale answer, ignore
+                    if (Interlocked.Read(ref _seq) != ticket)
+                        return;
                     _current = actual;
                     UpdateUi();
                 }, null);
@@ -111,43 +122,72 @@ internal sealed class TrayContext : ApplicationContext
 
     private void Apply(PowerProfile profile, bool silent = false)
     {
-        // Serializes keep-alive ticks against manual/hotkey switches.
-        if (Interlocked.Exchange(ref _busy, 1) != 0)
-            return;
-        Task.Run(() =>
+        lock (_queueLock)
         {
-            Exception? error = null;
-            try
+            _pending = profile;
+            _pendingSilent = silent;
+        }
+        Pump();
+    }
+
+    private async void Pump()
+    {
+        if (Interlocked.Exchange(ref _pumping, 1) != 0)
+            return;
+        try
+        {
+            while (true)
             {
-                using var client = new HpWmiClient();
-                new PowerController(client).ApplyProfile(profile);
-            }
-            catch (Exception ex)
-            {
-                error = ex;
-            }
-            _sync.Post(_ =>
-            {
+                PowerProfile next;
+                bool silent;
+                lock (_queueLock)
+                {
+                    if (_pending is null)
+                        return;
+                    next = _pending.Value;
+                    silent = _pendingSilent;
+                    _pending = null;
+                }
+
+                Exception? error = null;
                 try
                 {
-                    if (error is null)
+                    // wmi has no cancellation; a hung call trips the timeout instead of wedging the queue
+                    await Task.Run(() =>
                     {
-                        _current = profile;
-                        UpdateUi();
-                        if (!silent)
-                            OsdForm.ShowToast(Label(profile), profile);
-                    }
-                    else
-                    {
-                        MessageBox.Show(error.Message, "VictusControl", MessageBoxButtons.OK, MessageBoxIcon.Error);
-                    }
+                        using var client = new HpWmiClient();
+                        new PowerController(client).ApplyProfile(next);
+                    }).WaitAsync(ApplyTimeout);
                 }
-                finally
+                catch (Exception ex)
                 {
-                    Interlocked.Exchange(ref _busy, 0);
+                    error = ex;
                 }
-            }, null);
-        });
+
+                Interlocked.Increment(ref _seq);
+                if (error is null)
+                {
+                    _current = next;
+                    UpdateUi();
+                    if (!silent)
+                        OsdForm.ShowToast(Label(next), next);
+                }
+                else
+                {
+                    MessageBox.Show(error.Message, "VictusControl", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                }
+            }
+        }
+        finally
+        {
+            Interlocked.Exchange(ref _pumping, 0);
+            lock (_queueLock)
+            {
+                // request landed in the exit gap: pump again instead of losing it
+                if (_pending is not null)
+                    Pump();
+            }
+        }
     }
 
     private void Cycle()
