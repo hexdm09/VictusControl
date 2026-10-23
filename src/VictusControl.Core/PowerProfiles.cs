@@ -14,6 +14,32 @@ public enum PowerProfile
     Performance,
 }
 
+// graphics routing (BIOS setting, applies after reboot; NOT Advanced Optimus)
+public enum GpuMode : byte
+{
+    Hybrid = 0x00,
+    Discrete = 0x01,
+    Optimus = 0x02,
+}
+
+public static class GpuModeExtensions
+{
+    public static string Describe(this GpuMode mode) => mode switch
+    {
+        GpuMode.Hybrid => "Hybrid (iGPU + dGPU, automatic)",
+        GpuMode.Discrete => "Discrete (dGPU only, max performance)",
+        GpuMode.Optimus => "Optimus",
+        _ => $"Unknown (0x{(byte)mode:X2})",
+    };
+
+    public static GpuMode? Parse(string name) => name.ToLowerInvariant() switch
+    {
+        "hybrid" or "auto" or "optimus-hybrid" => GpuMode.Hybrid,
+        "discrete" or "dgpu" or "performance" => GpuMode.Discrete,
+        _ => null,
+    };
+}
+
 public static class PowerProfileExtensions
 {
     // Eco -> Balanced -> Performance -> Eco
@@ -25,27 +51,27 @@ public static class PowerProfileExtensions
     };
 }
 
-// 0x1A fan mode codes per thermal policy
+// 0x1A fan mode codes per thermal policy.
+// extensible table: owners of rare board revisions can append entries
+// without touching the switching logic.
 public static class FanModeCodes
 {
-    public static byte For(PowerProfile profile, ThermalPolicy policy) => policy switch
+    private static readonly Dictionary<(ThermalPolicy Policy, PowerProfile Profile), byte> Codes = new()
     {
-        ThermalPolicy.Modern => profile switch
-        {
-            PowerProfile.Eco => 0x50,
-            PowerProfile.Balanced => 0x30,
-            PowerProfile.Performance => 0x31,
-            _ => throw new ArgumentOutOfRangeException(nameof(profile)),
-        },
-        ThermalPolicy.Legacy => profile switch
-        {
-            PowerProfile.Eco => 0x03,
-            PowerProfile.Balanced => 0x00,
-            PowerProfile.Performance => 0x01,
-            _ => throw new ArgumentOutOfRangeException(nameof(profile)),
-        },
-        _ => throw new NotSupportedException($"Unknown thermal policy 0x{(byte)policy:X2}."),
+        // Modern V1 boards (2023+, e.g. 8C9C)
+        [(ThermalPolicy.Modern, PowerProfile.Eco)] = 0x50,
+        [(ThermalPolicy.Modern, PowerProfile.Balanced)] = 0x30,
+        [(ThermalPolicy.Modern, PowerProfile.Performance)] = 0x31,
+        // Legacy V0 boards
+        [(ThermalPolicy.Legacy, PowerProfile.Eco)] = 0x03,
+        [(ThermalPolicy.Legacy, PowerProfile.Balanced)] = 0x00,
+        [(ThermalPolicy.Legacy, PowerProfile.Performance)] = 0x01,
     };
+
+    public static byte For(PowerProfile profile, ThermalPolicy policy) =>
+        Codes.TryGetValue((policy, profile), out byte code)
+            ? code
+            : throw new NotSupportedException($"No fan mode code for {profile} on {policy} board.");
 
     public static PowerProfile? Parse(byte code) => code switch
     {

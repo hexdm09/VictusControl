@@ -6,4 +6,4 @@ dotnet publish src/VictusControl.App -c Release -o dist || exit /b 1
 cd dist
 .\VictusControl.exe --system
 echo.
-echo Tray: run VictusControlTray.exe, tick "Start with Windows" in its menu.
+echo App: run VictusControlTray.exe (main window + tray), enable "Start with Windows" in Settings.

@@ -10,6 +10,32 @@ internal static class ProfileIcons
     public static Icon Performance { get; } = Make(Color.OrangeRed);
     public static Icon Idle { get; } = Make(Color.Gray);
 
+    // real multi-size app icon (embedded resource, falls back to the exe icon)
+    public static Icon AppIcon { get; } = LoadAppIcon();
+
+    private static Icon LoadAppIcon()
+    {
+        try
+        {
+            using var stream = typeof(ProfileIcons).Assembly
+                .GetManifestResourceStream("VictusControl.App.app.ico");
+            if (stream is not null)
+                return new Icon(stream, new Size(32, 32));
+        }
+        catch
+        {
+            // fall through to the exe-embedded icon
+        }
+        try
+        {
+            return Icon.ExtractAssociatedIcon(Environment.ProcessPath!) ?? Idle;
+        }
+        catch
+        {
+            return Idle;
+        }
+    }
+
     public static Icon IconFor(PowerProfile profile) => profile switch
     {
         PowerProfile.Eco => Eco,

@@ -1,4 +1,6 @@
 using System.Diagnostics;
+using System.Xml;
+using System.Xml.Linq;
 
 namespace VictusControl.Core;
 
@@ -39,14 +41,17 @@ public static class AutostartManager
 
     public static void Disable()
     {
+        // exit code 1 from /Delete is ambiguous (failure or already absent);
+        // asking first turns "missing" into a clean no-op
+        if (!IsEnabled())
+            return;
         using var process = Run($"/Delete /TN \"{TaskName}\" /F");
         if (!process.WaitForExit(ChangeTimeout))
         {
             Kill(process);
             throw new TimeoutException("schtasks /Delete timed out.");
         }
-        // exit code 1 means task was already absent
-        if (process.ExitCode is not (0 or 1))
+        if (process.ExitCode != 0)
             throw new InvalidOperationException($"Failed to remove the autostart task (schtasks exit code {process.ExitCode}).");
     }
 
@@ -69,22 +74,40 @@ public static class AutostartManager
 
     // schtasks has no switch for battery policy, so patch the exported xml:
     // a laptop booting on battery would otherwise skip the logon task.
+    // parsed with XDocument instead of string Replace: a formatting change in
+    // a future schtasks would silently turn the patch into a no-op.
     private static void ApplyBatteryPolicy()
     {
-        string xml = QueryXml();
-        string patched = xml
-            .Replace("<DisallowStartIfOnBatteries>true</DisallowStartIfOnBatteries>",
-                "<DisallowStartIfOnBatteries>false</DisallowStartIfOnBatteries>")
-            .Replace("<StopIfGoingOnBatteries>true</StopIfGoingOnBatteries>",
-                "<StopIfGoingOnBatteries>false</StopIfGoingOnBatteries>");
-        if (patched == xml)
+        XNamespace ns = "http://schemas.microsoft.com/windows/2004/02/mit/task";
+        XDocument doc;
+        try
+        {
+            doc = XDocument.Parse(QueryXml());
+        }
+        catch (XmlException)
+        {
+            throw new InvalidOperationException("Task xml could not be parsed for the battery patch.");
+        }
+
+        XElement? settings = doc.Root?.Element(ns + "Settings");
+        bool changed = false;
+        foreach (string elementName in new[] { "DisallowStartIfOnBatteries", "StopIfGoingOnBatteries" })
+        {
+            XElement? element = settings?.Element(ns + elementName);
+            if (element is not null && !string.Equals(element.Value, "false", StringComparison.OrdinalIgnoreCase))
+            {
+                element.Value = "false";
+                changed = true;
+            }
+        }
+        if (!changed)
             return;
+
         // random name: predictable %TEMP% file under an elevated process is a squat risk
         string file = Path.Combine(Path.GetTempPath(), $"VictusControl_{Path.GetRandomFileName()}.xml");
         using (var stream = new FileStream(file, FileMode.CreateNew, FileAccess.Write))
-        using (var writer = new StreamWriter(stream))
         {
-            writer.Write(patched);
+            doc.Save(stream);
         }
         try
         {
@@ -101,6 +124,27 @@ public static class AutostartManager
         {
             try { File.Delete(file); } catch { }
         }
+
+        // verify the re-imported task really carries the patched values
+        bool disallow = ReadBatteryFlag(ns + "DisallowStartIfOnBatteries");
+        bool stop = ReadBatteryFlag(ns + "StopIfGoingOnBatteries");
+        if (disallow || stop)
+            throw new InvalidOperationException("Battery policy verification failed after re-import.");
+    }
+
+    private static bool ReadBatteryFlag(XName name)
+    {
+        try
+        {
+            XDocument doc = XDocument.Parse(QueryXml());
+            XNamespace ns = name.Namespace;
+            string? value = doc.Root?.Element(ns + "Settings")?.Element(name)?.Value;
+            return string.Equals(value, "true", StringComparison.OrdinalIgnoreCase);
+        }
+        catch
+        {
+            return true; // unreadable == unverifiable == report failure
+        }
     }
 
     private static string QueryXml()
@@ -113,15 +157,18 @@ public static class AutostartManager
             UseShellExecute = false,
             RedirectStandardOutput = true,
         }) ?? throw new InvalidOperationException($"Failed to start {SchTasksPath}.");
-        string output = process.StandardOutput.ReadToEnd();
-        if (!process.WaitForExit(QueryTimeout))
+
+        // drain the pipe asynchronously: a hung schtasks that never writes
+        // must still hit the timeout, not block ReadToEnd forever
+        Task<string> readTask = process.StandardOutput.ReadToEndAsync();
+        if (!process.WaitForExit(QueryTimeout) || !readTask.Wait(QueryTimeout))
         {
             Kill(process);
             throw new TimeoutException("schtasks /Query /XML timed out.");
         }
         if (process.ExitCode != 0)
             throw new InvalidOperationException($"Failed to export task xml (schtasks exit code {process.ExitCode}).");
-        return output;
+        return readTask.Result;
     }
 
     private static Process Run(string args)

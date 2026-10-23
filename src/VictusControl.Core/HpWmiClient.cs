@@ -1,4 +1,5 @@
 using Microsoft.Management.Infrastructure;
+using Microsoft.Management.Infrastructure.Options;
 
 namespace VictusControl.Core;
 
@@ -8,6 +9,7 @@ public enum BiosCommand : uint
     GpuRead = 0x21,
     GpuWrite = 0x22,
     SystemRead = 0x28,
+    GpuMode = 0x52,
 
     // protocol map entries reserved for future use
     FanCount = 0x10,
@@ -15,6 +17,9 @@ public enum BiosCommand : uint
     MaxFanRead = 0x26,
     MaxFanWrite = 0x27,
     CpuWrite = 0x29,
+    VictusFanSpeedGet = 0x2D,
+    VictusFanSpeedSet = 0x2E,
+    VictusFanTableGet = 0x2F,
 }
 
 // talks to ACPI\PNP0C14 via root\wmi without kernel drivers (passes Windows 11 HVCI)
@@ -23,7 +28,6 @@ public sealed class HpWmiClient : IHpWmiClient
     private const string Namespace = @"root\wmi";
     private const string MethodClass = "hpqBIntM";
     private const string DataClass = "hpqBDataIn";
-    private const uint GamingModule = 0x20008;
     private static readonly byte[] AuthSignature = [(byte)'S', (byte)'E', (byte)'C', (byte)'U'];
 
     private readonly CimSession _session;
@@ -33,7 +37,8 @@ public sealed class HpWmiClient : IHpWmiClient
 
     public HpWmiClient()
     {
-        var session = CimSession.Create(null);
+        var options = new DComSessionOptions();
+        var session = CimSession.Create(".", options);
         try
         {
             var dataClass = session.GetClass(Namespace, DataClass);
@@ -60,7 +65,7 @@ public sealed class HpWmiClient : IHpWmiClient
         }
     }
 
-    public int Execute(BiosCommand command, byte[]? payload, int responseSize, out byte[]? response)
+    public int Execute(uint module, BiosCommand command, byte[]? payload, int responseSize, out byte[]? response)
     {
         ObjectDisposedException.ThrowIf(_disposed, this);
 
@@ -69,7 +74,7 @@ public sealed class HpWmiClient : IHpWmiClient
 
         using var input = new CimInstance(_dataClass);
         Set(input, "Sign", AuthSignature);
-        Set(input, "Command", GamingModule);
+        Set(input, "Command", module);
         Set(input, "CommandType", (uint)command);
 
         if (payload is { Length: > 0 })
@@ -104,9 +109,9 @@ public sealed class HpWmiClient : IHpWmiClient
         return BiosReturnCode.WmiError;
     }
 
-    public void EnsureSuccess(BiosCommand command, byte[]? payload, int responseSize, out byte[]? response)
+    public void EnsureSuccess(uint module, BiosCommand command, byte[]? payload, int responseSize, out byte[]? response)
     {
-        int rc = Execute(command, payload, responseSize, out response);
+        int rc = Execute(module, command, payload, responseSize, out response);
         if (rc != BiosReturnCode.Ok)
             throw new InvalidOperationException($"BIOS command {command} failed: {BiosReturnCode.Describe(rc)}.");
     }

@@ -2,25 +2,67 @@ using VictusControl.Core;
 
 namespace VictusControl.App;
 
+public enum FanMode
+{
+    Auto,
+    Max,
+    Manual,
+}
+
+// one sensor read result (fresh client per poll; WMI has no cancellation)
+public sealed record SensorSnapshot(
+    bool Success, int CpuTemp, int GpuTemp, int Fan1Rpm, int Fan2Rpm, ThermalPolicy? Policy);
+
+// application shell: owns the main window, tray icon, apply queue, hotkeys,
+// keep-alive watchdog and the sensor poll loop.
 internal sealed class TrayContext : ApplicationContext
 {
     private static readonly TimeSpan KeepAliveInterval = TimeSpan.FromSeconds(75);
     private static readonly TimeSpan ApplyTimeout = TimeSpan.FromSeconds(10);
+    private static readonly TimeSpan SensorInterval = TimeSpan.FromSeconds(2);
+    private static readonly TimeSpan SensorLockTimeout = TimeSpan.FromSeconds(3);
     private const int CycleDebounceMs = 500;
+
+    // the EC exposes a single ACPI mailbox: every firmware command sequence
+    // (profile apply, fan write, sensor poll, gpu mode) must take this lock,
+    // otherwise a concurrent read can interleave with the apply write-readback
+    private readonly SemaphoreSlim _firmwareLock = new(1, 1);
+
+    // named signal: a second app instance asks this one to show its window
+    private readonly EventWaitHandle _showSignal;
+    private readonly Thread _showSignalThread;
+
+    public AppSettings Settings { get; }
+    public bool IsExiting { get; private set; }
+
+    /// <summary>Board capabilities from the startup probe; None until probed.</summary>
+    public BiosCapabilities Caps { get; private set; } = BiosCapabilities.None;
+
+    /// <summary>False when hpqBIntM is absent (not an OMEN/Victus board).</summary>
+    public bool HardwarePresent { get; private set; } = true;
+
+    public string HardwareError { get; private set; } = "";
+
+    /// <summary>Graphics routing last read from firmware (null = unknown).</summary>
+    public GpuMode? CurrentGpuMode { get; private set; }
 
     private readonly NotifyIcon _icon;
     private readonly ToolStripMenuItem _ecoItem;
     private readonly ToolStripMenuItem _balancedItem;
     private readonly ToolStripMenuItem _perfItem;
-    private readonly ToolStripMenuItem _autostartItem;
-    private readonly ToolStripMenuItem _keepAliveItem;
     private readonly HotkeyManager _hotkeys;
     private readonly System.Windows.Forms.Timer _keepAliveTimer;
+    private readonly System.Windows.Forms.Timer _sensorTimer;
     private readonly SynchronizationContext _sync;
 
+    private MainForm? _main;
+
     private PowerProfile _current = PowerProfile.Balanced;
-    private bool _keepAlive = true;
+    private FanMode _fanMode = FanMode.Auto;
+    private int _fanPercent;
+    private bool _autostartEnabled;
     private int _lastCycleTick;
+    private int _sensorPollsInFlight;
 
     // coalescing queue: latest request wins, nothing is silently dropped
     private readonly object _queueLock = new();
@@ -29,35 +71,53 @@ internal sealed class TrayContext : ApplicationContext
     private int _pumping;
     private long _seq;
 
+    private readonly object _fanLock = new();
+    private bool _fanRunning;
+    private bool _fanQueued;
+    private bool _fanOverrideActive;
+
+    public PowerProfile Current => _current;
+    public FanMode FanModeState => _fanMode;
+    public int FanManualPercent => _fanPercent;
+    public bool AutostartEnabled => _autostartEnabled;
+    public SensorSnapshot? LastSensors { get; private set; }
+
+    /// <summary>Fired on the UI thread whenever UI-relevant state changed.</summary>
+    public event Action? StateChanged;
+
+    /// <summary>Fired on the UI thread with a non-fatal error message.</summary>
+    public event Action<string>? ErrorRaised;
+
     public TrayContext()
     {
         _sync = SynchronizationContext.Current ?? new WindowsFormsSynchronizationContext();
+        Settings = AppSettings.Load();
 
-        _ecoItem = new ToolStripMenuItem("ECO", null, (_, _) => Apply(PowerProfile.Eco));
-        _balancedItem = new ToolStripMenuItem("Balanced", null, (_, _) => Apply(PowerProfile.Balanced));
-        _perfItem = new ToolStripMenuItem("Performance", null, (_, _) => Apply(PowerProfile.Performance));
-        _autostartItem = new ToolStripMenuItem("Start with Windows", null, (_, _) => ToggleAutostart())
-        {
-            Checked = QueryAutostartSafe(),
-        };
-        _keepAliveItem = new ToolStripMenuItem("Keep mode alive", null, (_, _) => ToggleKeepAlive())
-        {
-            Checked = _keepAlive,
-            ToolTipText = $"Re-apply the mode every {KeepAliveInterval.TotalSeconds:0}s so the EC firmware cannot silently reset it.",
-        };
+        _showSignal = new EventWaitHandle(false, EventResetMode.AutoReset, @"Local\VictusControlShowWindow");
+        _showSignalThread = new Thread(ShowSignalLoop) { IsBackground = true, Name = "VictusControlShowSignal" };
+        _showSignalThread.Start();
+
+        _ecoItem = new ToolStripMenuItem("ECO", null, (_, _) => ApplyProfile(PowerProfile.Eco));
+        _balancedItem = new ToolStripMenuItem("Balanced", null, (_, _) => ApplyProfile(PowerProfile.Balanced));
+        _perfItem = new ToolStripMenuItem("Performance", null, (_, _) => ApplyProfile(PowerProfile.Performance));
+        var maxFanItem = new ToolStripMenuItem("Max fan speed (100%)", null, (_, _) => SetFanMode(_fanMode == FanMode.Max ? FanMode.Auto : FanMode.Max, 0));
+        var openItem = new ToolStripMenuItem("Open VictusControl", null, (_, _) => ShowMain());
+        var exitItem = new ToolStripMenuItem("Exit", null, (_, _) => ExitApp());
 
         var menu = new ContextMenuStrip();
         menu.Items.AddRange([
+            openItem,
+            new ToolStripSeparator(),
             _ecoItem, _balancedItem, _perfItem,
             new ToolStripSeparator(),
-            _autostartItem, _keepAliveItem,
+            maxFanItem,
             new ToolStripSeparator(),
-            new ToolStripMenuItem("Exit", null, (_, _) => ExitThread()),
+            exitItem,
         ]);
         menu.Opening += (_, _) =>
         {
             UpdateUi();
-            RefreshFromFirmwareAsync();
+            RefreshProfileFromFirmware();
         };
 
         _icon = new NotifyIcon
@@ -67,35 +127,186 @@ internal sealed class TrayContext : ApplicationContext
             ContextMenuStrip = menu,
             Visible = true,
         };
-        _icon.DoubleClick += (_, _) => Cycle();
+        _icon.DoubleClick += (_, _) => ShowMain();
 
         _hotkeys = new HotkeyManager();
         _hotkeys.CycleRequested += Cycle;
         _hotkeys.Start();
 
-        // 75s tick: prevent ec from silently resetting custom fan profile
+        // 75s tick: prevent the EC from silently resetting the custom fan profile
         _keepAliveTimer = new System.Windows.Forms.Timer { Interval = (int)KeepAliveInterval.TotalMilliseconds };
         _keepAliveTimer.Tick += (_, _) =>
         {
-            if (_keepAlive)
-                Apply(_current, silent: true);
+            if (Settings.KeepAlive && HardwarePresent)
+                ApplyProfile(_current, silent: true);
         };
         _keepAliveTimer.Start();
 
+        _sensorTimer = new System.Windows.Forms.Timer { Interval = (int)SensorInterval.TotalMilliseconds };
+        _sensorTimer.Tick += (_, _) => PollSensors();
+
+        _autostartEnabled = QueryAutostartSafe();
+
+        _main = new MainForm(this);
+        if (Settings.StartMinimized)
+        {
+            // created hidden: alive in tray only until the user opens it
+            _main.ShowInTaskbar = false;
+        }
+        else
+        {
+            _main.Show();
+        }
+
         UpdateUi();
-        RefreshFromFirmwareAsync();
+        ProbeCapabilities();
+        RefreshProfileFromFirmware();
     }
 
-    private void UpdateUi()
+    // one read-only WMI sweep per start: firmware "not supported" answers
+    // become feature flags instead of runtime surprises
+    private void ProbeCapabilities()
     {
-        _ecoItem.Checked = _current == PowerProfile.Eco;
-        _balancedItem.Checked = _current == PowerProfile.Balanced;
-        _perfItem.Checked = _current == PowerProfile.Performance;
-        _icon.Icon = ProfileIcons.IconFor(_current);
-        _icon.Text = $"VictusControl: {_current}";
+        Task.Run(() =>
+        {
+            if (!_firmwareLock.Wait(ApplyTimeout))
+            {
+                _sync.Post(_ => ErrorRaised?.Invoke("Capability probe timed out."), null);
+                return;
+            }
+            try
+            {
+                using var client = new HpWmiClient();
+                BiosCapabilities caps = CapabilityProbe.Probe(client);
+                _sync.Post(_ =>
+                {
+                    Caps = caps;
+                    StateChanged?.Invoke();
+                }, null);
+            }
+            catch (Exception ex)
+            {
+                _sync.Post(_ =>
+                {
+                    HardwarePresent = false;
+                    HardwareError = ex.Message;
+                    StateChanged?.Invoke();
+                }, null);
+            }
+            finally
+            {
+                _firmwareLock.Release();
+            }
+        });
     }
 
-    private void RefreshFromFirmwareAsync()
+    public void ShowMain()
+    {
+        if (_main is null || _main.IsDisposed)
+            _main = new MainForm(this);
+        _main.ShowInTaskbar = true;
+        _main.Show();
+        _main.Activate();
+        ResumeSensors();
+    }
+
+    public void ExitApp()
+    {
+        IsExiting = true;
+        // a never-shown form (StartMinimized) closes without WM_CLOSE, so
+        // OnFormClosed never runs — guard the close and let Dispose clean up
+        if (_main is { IsDisposed: false })
+            _main.Close();
+        ExitThread();
+    }
+
+    private void ShowSignalLoop()
+    {
+        try
+        {
+            while (_showSignal.WaitOne())
+                _sync.Post(_ => ShowMain(), null);
+        }
+        catch (ObjectDisposedException)
+        {
+            // shutting down
+        }
+    }
+
+    // ---- sensors ---------------------------------------------------------
+
+    public void ResumeSensors()
+    {
+        _sensorTimer.Start();
+        PollSensors();
+    }
+
+    public void SuspendSensors() => _sensorTimer.Stop();
+
+    private void PollSensors()
+    {
+        if (!HardwarePresent || Interlocked.CompareExchange(ref _sensorPollsInFlight, 1, 0) != 0)
+            return;
+        long ticket = Interlocked.Read(ref _seq);
+        bool wantTemps = Caps.Temperatures;
+        bool wantFans = Caps.FanLevels;
+        bool wantGpuPower = Caps.GpuPower;
+        bool wantGpuMode = Caps.GpuModeSwitch;
+        ThermalPolicy? policy = Caps.Policy;
+        Task.Run(() =>
+        {
+            SensorSnapshot snapshot;
+            PowerProfile? actual = null;
+            GpuMode? gpuMode = CurrentGpuMode;
+            if (!_firmwareLock.Wait(SensorLockTimeout))
+            {
+                // apply or fan write in flight: skip this tick entirely
+                _sync.Post(_ =>
+                {
+                    Interlocked.Exchange(ref _sensorPollsInFlight, 0);
+                }, null);
+                return;
+            }
+            try
+            {
+                using var client = new HpWmiClient();
+                var controller = new PowerController(client);
+                var (cpu, gpu) = wantTemps ? controller.GetTemperatures() : (0, 0);
+                var (f1, f2) = wantFans ? controller.GetFanRpm() : (0, 0);
+                if (wantGpuPower)
+                    actual = controller.GetGpuPower().ToProfile();
+                if (wantGpuMode)
+                {
+                    try { gpuMode = controller.GetGpuMode(); } catch { }
+                }
+                snapshot = new SensorSnapshot(true, cpu, gpu, f1, f2, policy);
+            }
+            catch
+            {
+                snapshot = LastSensors is { } last
+                    ? last with { Success = false }
+                    : new SensorSnapshot(false, 0, 0, 0, 0, null);
+            }
+            finally
+            {
+                _firmwareLock.Release();
+            }
+
+            _sync.Post(_ =>
+            {
+                Interlocked.Exchange(ref _sensorPollsInFlight, 0);
+                LastSensors = snapshot;
+                CurrentGpuMode = gpuMode;
+                // profile changed from outside (firmware, Fn+P handled by us): follow it,
+                // unless our own apply finished while this poll was in flight
+                if (actual is { } profile && profile != _current && Interlocked.Read(ref _seq) == ticket)
+                    _current = profile;
+                StateChanged?.Invoke();
+            }, null);
+        });
+    }
+
+    private void RefreshProfileFromFirmware()
     {
         long ticket = Interlocked.Read(ref _seq);
         Task.Run(() =>
@@ -103,7 +314,8 @@ internal sealed class TrayContext : ApplicationContext
             try
             {
                 using var client = new HpWmiClient();
-                PowerProfile actual = new PowerController(client).GetGpuPower().ToProfile();
+                var controller = new PowerController(client);
+                PowerProfile actual = controller.GetGpuPower().ToProfile();
                 _sync.Post(_ =>
                 {
                     // a newer Apply finished while we were reading: stale answer, ignore
@@ -111,6 +323,7 @@ internal sealed class TrayContext : ApplicationContext
                         return;
                     _current = actual;
                     UpdateUi();
+                    StateChanged?.Invoke();
                 }, null);
             }
             catch
@@ -120,7 +333,9 @@ internal sealed class TrayContext : ApplicationContext
         });
     }
 
-    private void Apply(PowerProfile profile, bool silent = false)
+    // ---- profile apply queue ----------------------------------------------
+
+    public void ApplyProfile(PowerProfile profile, bool silent = false)
     {
         lock (_queueLock)
         {
@@ -155,8 +370,21 @@ internal sealed class TrayContext : ApplicationContext
                     // wmi has no cancellation; a hung call trips the timeout instead of wedging the queue
                     await Task.Run(() =>
                     {
-                        using var client = new HpWmiClient();
-                        new PowerController(client).ApplyProfile(next);
+                        // serialize against fan writes and the sensor poll: the EC
+                        // mailbox must not see an interleaved write/readback
+                        if (!_firmwareLock.Wait(ApplyTimeout))
+                            throw new TimeoutException("Firmware busy (lock timeout).");
+                        try
+                        {
+                            using var client = new HpWmiClient();
+                            var controller = new PowerController(client);
+                            controller.ApplyProfile(next, Caps);
+                            ReassertFanMode(controller);
+                        }
+                        finally
+                        {
+                            _firmwareLock.Release();
+                        }
                     }).WaitAsync(ApplyTimeout);
                 }
                 catch (Exception ex)
@@ -169,12 +397,30 @@ internal sealed class TrayContext : ApplicationContext
                 {
                     _current = next;
                     UpdateUi();
-                    if (!silent)
+                    if (!silent && Settings.ShowOsd)
                         OsdForm.ShowToast(Label(next), next);
+                    StateChanged?.Invoke();
+                }
+                else if (silent && error is TimeoutException)
+                {
+                    // a timed-out apply may still land in the firmware after a newer
+                    // one: schedule one silent retry of the same profile to converge
+                    lock (_queueLock)
+                    {
+                        _pending = next;
+                        _pendingSilent = true;
+                    }
+                    ErrorRaised?.Invoke($"Apply timed out: {error.Message} — retrying.");
+                }
+                else if (silent)
+                {
+                    // keep-alive failures must never modal-block a game session
+                    ErrorRaised?.Invoke($"Keep-alive failed: {error.Message}");
                 }
                 else
                 {
-                    MessageBox.Show(error.Message, "VictusControl", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                    MessageBox.Show(MessageBoxOwner, error.Message, "VictusControl", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                    ErrorRaised?.Invoke(error.Message);
                 }
             }
         }
@@ -190,16 +436,174 @@ internal sealed class TrayContext : ApplicationContext
         }
     }
 
-    private void Cycle()
+    // ---- fan control -------------------------------------------------------
+
+    public void SetFanMode(FanMode mode, int percent)
     {
-        int now = Environment.TickCount;
-        if (now - _lastCycleTick < CycleDebounceMs)
+        if (!HardwarePresent || (!Caps.FanLevels && !Caps.MaxFan))
+        {
+            StateChanged?.Invoke(); // board without fan control: UI reflects it, no firmware call
             return;
-        _lastCycleTick = now;
-        Apply(_current.Next());
+        }
+        if (mode == FanMode.Manual && percent is < 1 or > 100)
+            throw new ArgumentOutOfRangeException(nameof(percent), "Manual fan percent must be 1..100.");
+        if (mode == FanMode.Manual && !Caps.FanLevels)
+            mode = FanMode.Max; // percent unsupported: nearest supported request
+        if (mode == FanMode.Max && !Caps.MaxFan)
+        {
+            // no 0x27 on this board: 100% through the percent subcommand instead,
+            // so the UI promise "Max 100%" still reaches the fans
+            mode = FanMode.Manual;
+            percent = 100;
+        }
+        _fanMode = mode;
+        _fanPercent = mode == FanMode.Manual ? percent : 0;
+        UpdateUi();
+        StateChanged?.Invoke();
+        if (Settings.ShowOsd)
+            OsdForm.ShowToast(FanLabel(mode, _fanPercent), _current);
+        QueueFanApply();
     }
 
-    private void ToggleAutostart()
+    // fan requests are coalesced the same way as profiles: a slider drag fires
+    // many events, only the last must reach the firmware, never in parallel
+    private void QueueFanApply()
+    {
+        lock (_fanLock)
+        {
+            _fanQueued = true;
+            if (_fanRunning)
+                return;
+            _fanRunning = true;
+        }
+        Task.Run(() =>
+        {
+            while (true)
+            {
+                lock (_fanLock)
+                {
+                    if (!_fanQueued)
+                    {
+                        _fanRunning = false;
+                        return;
+                    }
+                    _fanQueued = false;
+                }
+                Exception? error = null;
+                try
+                {
+                    // same timeout discipline as the profile pump: a hung WMI call
+                    // must not wedge the fan worker with _fanRunning stuck true
+                    Task.Run(() =>
+                    {
+                        if (!_firmwareLock.Wait(ApplyTimeout))
+                            throw new TimeoutException("Firmware busy (lock timeout).");
+                        try
+                        {
+                            using var client = new HpWmiClient();
+                            ReassertFanMode(new PowerController(client));
+                        }
+                        finally
+                        {
+                            _firmwareLock.Release();
+                        }
+                    }).Wait(ApplyTimeout);
+                }
+                catch (Exception ex)
+                {
+                    error = ex;
+                }
+                if (error is not null)
+                    _sync.Post(_ => ErrorRaised?.Invoke($"Fan control failed: {error.Message}"), null);
+            }
+        });
+    }
+
+    // re-applies the current fan mode after a profile switch or keep-alive tick:
+    // every ApplyProfile resets the curve back to firmware auto
+    private void ReassertFanMode(PowerController controller)
+    {
+        if (_fanMode == FanMode.Auto && !_fanOverrideActive)
+            return; // pure auto with nothing overridden: nothing to reassert
+        if (_fanMode == FanMode.Max && Caps.MaxFan)
+        {
+            _fanOverrideActive = true;
+            controller.SetMaxFan(true);
+        }
+        else if (_fanMode == FanMode.Manual && _fanPercent is > 0 && Caps.FanLevels)
+        {
+            _fanOverrideActive = true;
+            controller.SetFanPercent(_fanPercent, _fanPercent);
+        }
+        else
+        {
+            _fanOverrideActive = false;
+            controller.SetMaxFan(false);
+        }
+    }
+
+    /// <summary>Schedules the BIOS graphics mode; takes effect after a reboot.</summary>
+    public void RequestGpuMode(GpuMode mode)
+    {
+        var answer = MessageBox.Show(
+            MessageBoxOwner,
+            $"Switch graphics mode to {mode}?\nThis changes a BIOS setting and takes effect after the next reboot.",
+            "VictusControl — graphics mode",
+            MessageBoxButtons.YesNo,
+            MessageBoxIcon.Question,
+            MessageBoxDefaultButton.Button2);
+        if (answer != DialogResult.Yes)
+        {
+            StateChanged?.Invoke();
+            return;
+        }
+
+        Task.Run(() =>
+        {
+            try
+            {
+                if (!_firmwareLock.Wait(ApplyTimeout))
+                    throw new TimeoutException("Firmware busy (lock timeout).");
+                try
+                {
+                    using var client = new HpWmiClient();
+                    new PowerController(client).SetGpuMode(mode);
+                }
+                finally
+                {
+                    _firmwareLock.Release();
+                }
+                _sync.Post(_ =>
+                {
+                    CurrentGpuMode = mode;
+                    ErrorRaised?.Invoke($"GPU mode scheduled: {mode} — reboot to apply.");
+                    StateChanged?.Invoke();
+                }, null);
+            }
+            catch (Exception ex)
+            {
+                _sync.Post(_ => ErrorRaised?.Invoke($"GPU mode switch failed: {ex.Message}"), null);
+            }
+        });
+    }
+
+    private static string FanLabel(FanMode mode, int percent) => mode switch
+    {
+        FanMode.Max => "Max Fan: ON (100%)",
+        FanMode.Manual => $"Fans: {percent}%",
+        _ => "Fans: Auto",
+    };
+
+    // ---- misc actions ------------------------------------------------------
+
+    public void SetKeepAlive(bool enabled)
+    {
+        Settings.KeepAlive = enabled;
+        Settings.Save();
+        StateChanged?.Invoke();
+    }
+
+    public void ToggleAutostart()
     {
         try
         {
@@ -207,13 +611,18 @@ internal sealed class TrayContext : ApplicationContext
                 AutostartManager.Disable();
             else
                 AutostartManager.Enable(Application.ExecutablePath);
-            _autostartItem.Checked = QueryAutostartSafe();
+            _autostartEnabled = QueryAutostartSafe();
         }
         catch (Exception ex)
         {
-            MessageBox.Show(ex.Message, "VictusControl", MessageBoxButtons.OK, MessageBoxIcon.Error);
+            MessageBox.Show(MessageBoxOwner, ex.Message, "VictusControl", MessageBoxButtons.OK, MessageBoxIcon.Error);
         }
+        StateChanged?.Invoke();
     }
+
+    // modal dialogs must disable the window when it is on screen
+    private IWin32Window? MessageBoxOwner =>
+        _main is { IsDisposed: false, Visible: true } ? _main : null;
 
     private static bool QueryAutostartSafe()
     {
@@ -223,12 +632,35 @@ internal sealed class TrayContext : ApplicationContext
         }
         catch
         {
-            // A hung schtasks must never kill the tray at startup.
+            // a hung schtasks must never kill the app at startup
             return false;
         }
     }
 
-    private void ToggleKeepAlive() => (_keepAlive, _keepAliveItem.Checked) = (!_keepAlive, !_keepAlive);
+    private void Cycle()
+    {
+        int now = Environment.TickCount;
+        if (now - _lastCycleTick < CycleDebounceMs)
+            return;
+        _lastCycleTick = now;
+        ApplyProfile(_current.Next());
+    }
+
+    private void UpdateUi()
+    {
+        _ecoItem.Checked = _current == PowerProfile.Eco;
+        _balancedItem.Checked = _current == PowerProfile.Balanced;
+        _perfItem.Checked = _current == PowerProfile.Performance;
+        _icon.Icon = ProfileIcons.IconFor(_current);
+        _icon.Text = $"VictusControl: {_current}{FanSuffix()}";
+    }
+
+    private string FanSuffix() => _fanMode switch
+    {
+        FanMode.Max => " [Max Fan]",
+        FanMode.Manual => $" [Fan {_fanPercent}%]",
+        _ => "",
+    };
 
     private static string Label(PowerProfile profile) => profile switch
     {
@@ -241,9 +673,13 @@ internal sealed class TrayContext : ApplicationContext
     {
         if (disposing)
         {
+            IsExiting = true;
+            _sensorTimer.Dispose();
             _keepAliveTimer.Dispose();
             _hotkeys.Dispose();
             _icon.Dispose();
+            _showSignal.Dispose();
+            _firmwareLock.Dispose();
         }
         base.Dispose(disposing);
     }

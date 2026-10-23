@@ -2,5 +2,13 @@
   <PropertyGroup>
     <!-- Pinned: 'latest' would silently adopt new language versions on SDK updates. -->
     <LangVersion>13</LangVersion>
+    <!-- Legacy RID graph: needed for the MMI native dll resolution in single-file publish. -->
+    <UseRidGraph>true</UseRidGraph>
+
+    <!-- Assembly metadata for both executables (README claims v0.0.1-alpha). -->
+    <Version>0.0.1-alpha</Version>
+    <Authors>hexdm09</Authors>
+    <Product>VictusControl</Product>
+    <Description>Lightweight OMEN Gaming Hub replacement for HP Victus/OMEN laptops</Description>
   </PropertyGroup>
 </Project>

@@ -33,7 +33,7 @@ internal sealed class OsdForm : Form
         {
             Text = text,
             AutoSize = true,
-            Font = new Font("Segoe UI", 14, FontStyle.Bold),
+            Font = UiTheme.Font(14, FontStyle.Bold, DeviceDpi),
             ForeColor = Color.White,
             BackColor = Color.Transparent,
             Dock = DockStyle.Fill,
@@ -45,8 +45,9 @@ internal sealed class OsdForm : Form
 
         Load += (_, _) =>
         {
-            var area = Screen.PrimaryScreen?.WorkingArea ?? new Rectangle(0, 0, 1920, 1080);
-            Location = new Point(area.X + ((area.Width - Width) / 2), area.Y + 90);
+            // show on the screen the user is looking at, not blindly on the primary
+            Rectangle area = Screen.FromPoint(Cursor.Position).WorkingArea;
+            Location = new Point(area.X + ((area.Width - Width) / 2), area.Y + UiTheme.Scaled(90, DeviceDpi));
         };
 
         _closeTimer = new System.Windows.Forms.Timer { Interval = DisplayMs };
@@ -81,9 +82,16 @@ internal sealed class OsdForm : Form
 
     public static void ShowToast(string text, PowerProfile profile)
     {
+        OsdForm form = new(text, ProfileIcons.AccentFor(profile));
+        // guard by reference: the previous toast closes asynchronously and must
+        // not clear the pointer to this newer one when its FormClosed fires
+        form.FormClosed += (_, _) =>
+        {
+            if (ReferenceEquals(_active, form))
+                _active = null;
+        };
         _active?.Close();
-        _active = new OsdForm(text, ProfileIcons.AccentFor(profile));
-        _active.FormClosed += (_, _) => _active = null;
-        _active.Show();
+        _active = form;
+        form.Show();
     }
 }

@@ -75,6 +75,9 @@ internal sealed class HotkeyManager : IDisposable
 
     private void RaiseCycle()
     {
+        // the caller constructed us on the UI thread, so the context is always
+        // present; if that invariant ever breaks we must NOT touch UI from here
+        System.Diagnostics.Debug.Assert(_sync is not null, "HotkeyManager must be created on the UI thread");
         if (_sync is not null)
             _sync.Post(_ => CycleRequested?.Invoke(), null);
         else
@@ -115,8 +118,17 @@ internal sealed class HotkeyManager : IDisposable
         public HotkeyWindow()
         {
             CreateHandle(new CreateParams());
-            if (!RegisterHotKey(Handle, 1, MOD_CONTROL | MOD_SHIFT, (uint)Keys.P))
-                throw new InvalidOperationException("RegisterHotKey failed.");
+            try
+            {
+                if (!RegisterHotKey(Handle, 1, MOD_CONTROL | MOD_SHIFT, (uint)Keys.P))
+                    throw new InvalidOperationException("RegisterHotKey failed.");
+            }
+            catch
+            {
+                // never leak the window we just created when hotkey registration fails
+                DestroyHandle();
+                throw;
+            }
         }
 
         protected override void WndProc(ref Message m)
