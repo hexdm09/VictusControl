@@ -1,0 +1,178 @@
+<ResourceDictionary xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+                    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml">
+
+    <!-- palette (matches the v33 reference widget) -->
+    <Color x:Key="BgColor">#0B0C0F</Color>
+    <Color x:Key="CardColor">#17181C</Color>
+    <Color x:Key="PillColor">#26262C</Color>
+    <Color x:Key="PillHoverColor">#2E2E35</Color>
+    <Color x:Key="AccentColor">#4CC9F0</Color>
+    <Color x:Key="EcoColor">#5EC871</Color>
+    <Color x:Key="PerfColor">#FF6C5C</Color>
+    <Color x:Key="WarnColor">#F5B450</Color>
+
+    <SolidColorBrush x:Key="Bg" Color="{StaticResource BgColor}" />
+    <SolidColorBrush x:Key="Card" Color="{StaticResource CardColor}" />
+    <SolidColorBrush x:Key="Pill" Color="{StaticResource PillColor}" />
+    <SolidColorBrush x:Key="PillHover" Color="{StaticResource PillHoverColor}" />
+    <SolidColorBrush x:Key="Accent" Color="{StaticResource AccentColor}" />
+    <SolidColorBrush x:Key="Eco" Color="{StaticResource EcoColor}" />
+    <SolidColorBrush x:Key="Perf" Color="{StaticResource PerfColor}" />
+    <SolidColorBrush x:Key="Balanced" Color="{StaticResource AccentColor}" />
+    <SolidColorBrush x:Key="Warn" Color="{StaticResource WarnColor}" />
+    <SolidColorBrush x:Key="Text" Color="#EDEFF4" />
+    <SolidColorBrush x:Key="TextDim" Color="#8B93A3" />
+    <SolidColorBrush x:Key="TextFaint" Color="#565D6C" />
+    <SolidColorBrush x:Key="AccentText" Color="#06222E" />
+
+    <FontFamily x:Key="UiFont">Segoe UI, Segoe UI Variable</FontFamily>
+
+    <!-- mode pill: dark segment, cyan fill when active (v33 style) -->
+    <Style x:Key="ModePill" TargetType="RadioButton">
+        <Setter Property="Foreground" Value="{StaticResource TextDim}" />
+        <Setter Property="Cursor" Value="Hand" />
+        <Setter Property="FontSize" Value="12" />
+        <Setter Property="FontWeight" Value="SemiBold" />
+        <Setter Property="Focusable" Value="False" />
+        <Setter Property="Margin" Value="0,0,8,0" />
+        <Setter Property="Height" Value="34" />
+        <Setter Property="HorizontalContentAlignment" Value="Center" />
+        <Setter Property="VerticalContentAlignment" Value="Center" />
+        <Setter Property="Template">
+            <Setter.Value>
+                <ControlTemplate TargetType="RadioButton">
+                    <Border x:Name="Root" Background="{StaticResource Pill}" CornerRadius="17"
+                            BorderThickness="1" BorderBrush="Transparent">
+                        <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center" RecognizesAccessKey="True" />
+                    </Border>
+                    <ControlTemplate.Triggers>
+                        <Trigger Property="IsChecked" Value="True">
+                            <Setter Property="Foreground" Value="{StaticResource AccentText}" />
+                            <Setter Property="FontWeight" Value="Bold" />
+                            <Setter TargetName="Root" Property="Background" Value="{StaticResource Accent}" />
+                        </Trigger>
+                        <Trigger Property="IsMouseOver" Value="True">
+                            <Setter TargetName="Root" Property="Background" Value="{StaticResource PillHover}" />
+                        </Trigger>
+                        <Trigger Property="IsEnabled" Value="False">
+                            <Setter Property="Opacity" Value="0.35" />
+                        </Trigger>
+                    </ControlTemplate.Triggers>
+                </ControlTemplate>
+            </Setter.Value>
+        </Setter>
+    </Style>
+
+    <!-- small quiet pill (fan auto/max, graphics) -->
+    <Style x:Key="SmallPill" TargetType="RadioButton" BasedOn="{StaticResource ModePill}">
+        <Setter Property="FontSize" Value="10.5" />
+        <Setter Property="Height" Value="26" />
+    </Style>
+
+    <!-- compact toggle switch -->
+    <Style x:Key="MiniToggle" TargetType="CheckBox">
+        <Setter Property="Cursor" Value="Hand" />
+        <Setter Property="Focusable" Value="False" />
+        <Setter Property="Template">
+            <Setter.Value>
+                <ControlTemplate TargetType="CheckBox">
+                    <Grid>
+                        <Border x:Name="Track" Width="34" Height="18" CornerRadius="9"
+                                Background="{StaticResource Pill}" BorderBrush="#33343B" BorderThickness="1" />
+                        <Ellipse x:Name="Thumb" Width="12" Height="12" Fill="{StaticResource TextDim}"
+                                 HorizontalAlignment="Left" VerticalAlignment="Center" Margin="4,0,0,0" />
+                    </Grid>
+                    <ControlTemplate.Triggers>
+                        <Trigger Property="IsChecked" Value="True">
+                            <Setter TargetName="Track" Property="Background" Value="{StaticResource Accent}" />
+                            <Setter TargetName="Thumb" Property="Fill" Value="{StaticResource AccentText}" />
+                            <Setter TargetName="Thumb" Property="Margin" Value="18,0,0,0" />
+                        </Trigger>
+                    </ControlTemplate.Triggers>
+                </ControlTemplate>
+            </Setter.Value>
+        </Setter>
+    </Style>
+
+    <!-- caption above a row -->
+    <Style x:Key="RowCaption" TargetType="TextBlock">
+        <Setter Property="FontFamily" Value="{StaticResource UiFont}" />
+        <Setter Property="FontSize" Value="9.5" />
+        <Setter Property="FontWeight" Value="SemiBold" />
+        <Setter Property="Foreground" Value="{StaticResource TextFaint}" />
+        <Setter Property="Margin" Value="2,0,0,6" />
+    </Style>
+
+    <!-- tiny window glyph button -->
+    <Style x:Key="GlyphButton" TargetType="Button">
+        <Setter Property="Foreground" Value="{StaticResource TextFaint}" />
+        <Setter Property="Background" Value="Transparent" />
+        <Setter Property="Cursor" Value="Hand" />
+        <Setter Property="FontFamily" Value="Segoe MDL2 Assets" />
+        <Setter Property="FontSize" Value="9" />
+        <Setter Property="Width" Value="26" />
+        <Setter Property="Height" Value="22" />
+        <Setter Property="Focusable" Value="False" />
+        <Setter Property="Template">
+            <Setter.Value>
+                <ControlTemplate TargetType="Button">
+                    <Border x:Name="Root" Background="Transparent" CornerRadius="5">
+                        <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center" />
+                    </Border>
+                    <ControlTemplate.Triggers>
+                        <Trigger Property="IsMouseOver" Value="True">
+                            <Setter Property="Foreground" Value="{StaticResource Text}" />
+                            <Setter TargetName="Root" Property="Background" Value="#222329" />
+                        </Trigger>
+                    </ControlTemplate.Triggers>
+                </ControlTemplate>
+            </Setter.Value>
+        </Setter>
+    </Style>
+
+    <!-- compact slider -->
+    <Style x:Key="MiniSlider" TargetType="Slider">
+        <Setter Property="Foreground" Value="{StaticResource Accent}" />
+        <Setter Property="Height" Value="18" />
+        <Setter Property="IsMoveToPointEnabled" Value="True" />
+        <Setter Property="Template">
+            <Setter.Value>
+                <ControlTemplate TargetType="Slider">
+                    <Grid VerticalAlignment="Center">
+                        <Track x:Name="PART_Track">
+                            <Track.DecreaseRepeatButton>
+                                <RepeatButton Command="Slider.DecreaseLarge" Focusable="False" Height="5">
+                                    <RepeatButton.Template>
+                                        <ControlTemplate TargetType="RepeatButton">
+                                            <Border Height="5" CornerRadius="2.5" Background="{StaticResource Accent}" />
+                                        </ControlTemplate>
+                                    </RepeatButton.Template>
+                                </RepeatButton>
+                            </Track.DecreaseRepeatButton>
+                            <Track.IncreaseRepeatButton>
+                                <RepeatButton Command="Slider.IncreaseLarge" Focusable="False" Height="5">
+                                    <RepeatButton.Template>
+                                        <ControlTemplate TargetType="RepeatButton">
+                                            <Border Height="5" CornerRadius="2.5" Background="{StaticResource Pill}" />
+                                        </ControlTemplate>
+                                    </RepeatButton.Template>
+                                </RepeatButton>
+                            </Track.IncreaseRepeatButton>
+                            <Track.Thumb>
+                                <Thumb Focusable="False" Width="14" Height="14">
+                                    <Thumb.Template>
+                                        <ControlTemplate TargetType="Thumb">
+                                            <Ellipse Width="14" Height="14" Fill="{StaticResource Accent}"
+                                                     Stroke="{StaticResource Card}" StrokeThickness="2.5" />
+                                        </ControlTemplate>
+                                    </Thumb.Template>
+                                </Thumb>
+                            </Track.Thumb>
+                        </Track>
+                    </Grid>
+                </ControlTemplate>
+            </Setter.Value>
+        </Setter>
+    </Style>
+
+</ResourceDictionary>

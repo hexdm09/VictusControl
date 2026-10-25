@@ -1,4 +1,5 @@
 using System.Diagnostics;
+using System.IO;
 using System.Runtime.InteropServices;
 
 namespace VictusControl.App;
@@ -34,17 +35,18 @@ internal static class Program
         using (mutex)
         {
             AppDomain.CurrentDomain.UnhandledException += (_, e) => WriteCrashLog(e.ExceptionObject.ToString() ?? "");
-            Application.ThreadException += (_, e) => WriteCrashLog(e.Exception.ToString());
+            Application.SetUnhandledExceptionMode(System.Windows.Forms.UnhandledExceptionMode.CatchException);
+            System.Windows.Forms.Application.ThreadException += (_, e) => WriteCrashLog(e.Exception.ToString());
 
-            ApplicationConfiguration.Initialize();
             try
             {
-                Application.Run(new TrayContext());
+                new App().Run();
             }
             catch (Exception ex)
             {
                 WriteCrashLog(ex.ToString());
-                MessageBox.Show(ex.Message, "VictusControl — fatal error", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                System.Windows.Forms.MessageBox.Show(ex.Message, "VictusControl — fatal error",
+                    System.Windows.Forms.MessageBoxButtons.OK, System.Windows.Forms.MessageBoxIcon.Error);
             }
         }
     }

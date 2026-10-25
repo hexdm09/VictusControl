@@ -13,6 +13,31 @@ internal static class ProfileIcons
     // real multi-size app icon (embedded resource, falls back to the exe icon)
     public static Icon AppIcon { get; } = LoadAppIcon();
 
+    // WPF window icon from the same embedded .ico
+    public static System.Windows.Media.ImageSource AppIconImageSource { get; } = LoadAppIconImageSource();
+
+    private static System.Windows.Media.ImageSource LoadAppIconImageSource()
+    {
+        try
+        {
+            using var stream = typeof(ProfileIcons).Assembly
+                .GetManifestResourceStream("VictusControl.App.app.ico");
+            if (stream is not null)
+            {
+                var frame = System.Windows.Media.Imaging.BitmapFrame.Create(
+                    stream, System.Windows.Media.Imaging.BitmapCreateOptions.None,
+                    System.Windows.Media.Imaging.BitmapCacheOption.OnLoad);
+                frame.Freeze();
+                return frame;
+            }
+        }
+        catch
+        {
+            // fall through: a window without an icon is acceptable
+        }
+        return null!; // Window.Icon accepts null (falls back to the default)
+    }
+
     private static Icon LoadAppIcon()
     {
         try
