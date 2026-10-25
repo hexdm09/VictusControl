@@ -1,7 +1,0 @@
-Тестовый запуск для C:\pr2\tests\VictusControl.Core.Tests\bin\Release\net9.0\VictusControl.Core.Tests.dll (.NETCoreApp,Version=v9.0)
-Версия VSTest 17.14.1 (x64)
-
-Запуск выполнения тестов; подождите...
-Общее количество тестовых файлов (1), соответствующих указанному шаблону.
-
-Пройден!   : не пройдено     0, пройдено    69, пропущено     0, всего    69, длительность 199 ms. - VictusControl.Core.Tests.dll (net9.0)
