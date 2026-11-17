@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+import shutil
 import sys
 import threading
 from typing import Any
@@ -10,6 +11,47 @@ from victus_control.display import DisplayRefreshManager
 from victus_control.ipc import DEFAULT_SOCKET_PATH, VictusIpcClient
 from victus_control.models import FanMode, PowerProfile, VictusError
 from victus_control.sysfs_backend import LinuxSysfsBackend
+
+APP_ID = "io.github.hexdm09.VictusControl"
+
+
+def _ensure_user_desktop_icon() -> None:
+    """Ensure GNOME Wayland Dock / Alt+Tab can resolve <APP_ID>.desktop and <APP_ID>.svg."""
+    try:
+        svg_src = Path(__file__).parent / "icons/hicolor/scalable/apps" / f"{APP_ID}.svg"
+        if not svg_src.is_file():
+            return
+        data_home = Path.home() / ".local/share"
+        icon_dst = data_home / "icons/hicolor/scalable/apps" / f"{APP_ID}.svg"
+        desktop_dst = data_home / "applications" / f"{APP_ID}.desktop"
+
+        if not icon_dst.is_file():
+            icon_dst.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copyfile(svg_src, icon_dst)
+
+        if not desktop_dst.is_file():
+            desktop_dst.parent.mkdir(parents=True, exist_ok=True)
+            repo_src = Path(__file__).resolve().parents[2]
+            exec_cmd = (
+                "/usr/local/bin/victus-control-gui"
+                if Path("/usr/local/bin/victus-control-gui").exists()
+                else f"/usr/bin/env PYTHONPATH={repo_src} /usr/bin/python3 -m victus_control.ui.app"
+            )
+            desktop_dst.write_text(
+                f"[Desktop Entry]\n"
+                f"Type=Application\n"
+                f"Name=VictusControl\n"
+                f"Comment=Power profiles, fan curve, and Eco battery saver\n"
+                f"Exec={exec_cmd}\n"
+                f"Icon={APP_ID}\n"
+                f"StartupWMClass={APP_ID}\n"
+                f"Terminal=false\n"
+                f"Categories=System;Settings;HardwareSettings;\n",
+                encoding="utf-8",
+            )
+    except OSError:
+        # Read-only sandbox or container: Gtk.IconTheme search path still renders in-window icon
+        pass
 
 
 def _load_gtk():
@@ -23,6 +65,7 @@ def _load_gtk():
 
 
 def main(argv: list[str] | None = None) -> int:
+    _ensure_user_desktop_icon()
     Adw, Gdk, GLib, Gtk = _load_gtk()
 
     class VictusWindow(Adw.ApplicationWindow):
@@ -30,6 +73,7 @@ def main(argv: list[str] | None = None) -> int:
             super().__init__(application=app, title="VictusControl")
             self.set_default_size(476, -1)
             self.set_resizable(False)
+            self.set_icon_name(APP_ID)
             self.add_css_class("victus-window")
 
             self._client = VictusIpcClient(DEFAULT_SOCKET_PATH)
@@ -38,26 +82,36 @@ def main(argv: list[str] | None = None) -> int:
             self._slider_debounce_id: int | None = None
             self._poll_in_flight = False
 
-            self._load_css()
+            self._load_css_and_icons()
             self._build_ui()
             self._refresh_async()
             self._timer_id = GLib.timeout_add(2000, self._on_poll_tick)
 
-        def _load_css(self) -> None:
+        def _load_css_and_icons(self) -> None:
             provider = Gtk.CssProvider()
-            css_path = Path(__file__).with_name("theme.css")
-            provider.load_from_path(str(css_path))
+            ui_dir = Path(__file__).parent
+            provider.load_from_path(str(ui_dir / "theme.css"))
             display = Gdk.Display.get_default()
             if display is not None:
                 Gtk.StyleContext.add_provider_for_display(
                     display, provider, Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION
                 )
+                icon_theme = Gtk.IconTheme.get_for_display(display)
+                icon_theme.add_search_path(str(ui_dir / "icons"))
+            Gtk.Window.set_default_icon_name(APP_ID)
 
         def _build_ui(self) -> None:
             outer = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=0)
 
             header_bar = Adw.HeaderBar()
-            header_bar.set_title_widget(Gtk.Label(label="VICTUS CONTROL"))
+            title_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+            svg_file = Path(__file__).parent / "icons/hicolor/scalable/apps" / f"{APP_ID}.svg"
+            if svg_file.is_file():
+                logo = Gtk.Image.new_from_file(str(svg_file))
+                logo.set_pixel_size(20)
+                title_box.append(logo)
+            title_box.append(Gtk.Label(label="VICTUS CONTROL"))
+            header_bar.set_title_widget(title_box)
             outer.append(header_bar)
 
             card = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=14)
@@ -68,7 +122,6 @@ def main(argv: list[str] | None = None) -> int:
             card.set_margin_end(14)
             outer.append(card)
 
-            # Daemon warning banner (hidden when victusd is running)
             self._daemon_banner = Gtk.Label(
                 label="Read-only mode: 'victusd' service is not running yet. Run ./install_linux.sh to enable hardware writes.",
                 wrap=True,
@@ -89,10 +142,10 @@ def main(argv: list[str] | None = None) -> int:
             card.append(top_row)
 
             # Mode pills: ECO | BALANCED | PERF
-            mode_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
+            self._mode_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
             mode_cap = Gtk.Label(label="POWER MODE", xalign=0.0)
             mode_cap.add_css_class("section-caption")
-            mode_box.append(mode_cap)
+            self._mode_box.append(mode_cap)
 
             pills_grid = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8, homogeneous=True)
             self._btn_eco = Gtk.Button(label="ECO")
@@ -106,16 +159,16 @@ def main(argv: list[str] | None = None) -> int:
                 btn.add_css_class("mode-pill")
                 btn.connect("clicked", lambda _b, p=prof: self._on_profile_clicked(p))
                 pills_grid.append(btn)
-            mode_box.append(pills_grid)
-            card.append(mode_box)
+            self._mode_box.append(pills_grid)
+            card.append(self._mode_box)
 
-            # Fan controls: AUTO | CURVE | MAX + slider
-            fan_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
-            fan_cap = Gtk.Label(label="FANS", xalign=0.0)
-            fan_cap.add_css_class("section-caption")
-            fan_box.append(fan_cap)
+            # Fan controls: AUTO | CURVE | MAX + slider (adapts to kernel capability)
+            self._fan_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
+            self._fan_cap = Gtk.Label(label="FANS", xalign=0.0)
+            self._fan_cap.add_css_class("section-caption")
+            self._fan_box.append(self._fan_cap)
 
-            fan_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
+            self._fan_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
             self._btn_fan_auto = Gtk.Button(label="AUTO")
             self._btn_fan_curve = Gtk.Button(label="CURVE")
             self._btn_fan_max = Gtk.Button(label="MAX")
@@ -126,22 +179,22 @@ def main(argv: list[str] | None = None) -> int:
             ):
                 btn.add_css_class("fan-pill")
                 btn.connect("clicked", lambda _b, m=fmode: self._on_fan_mode_clicked(m))
-                fan_row.append(btn)
+                self._fan_row.append(btn)
 
             self._fan_slider = Gtk.Scale.new_with_range(Gtk.Orientation.HORIZONTAL, 10, 100, 1)
             self._fan_slider.set_draw_value(False)
             self._fan_slider.set_hexpand(True)
             self._fan_slider.set_value(45)
             self._fan_slider.connect("value-changed", self._on_slider_changed)
-            fan_row.append(self._fan_slider)
+            self._fan_row.append(self._fan_slider)
 
             self._fan_pct_label = Gtk.Label(label="45%", width_chars=4, xalign=1.0)
             self._fan_pct_label.add_css_class("tabular-readout")
-            fan_row.append(self._fan_pct_label)
-            fan_box.append(fan_row)
-            card.append(fan_box)
+            self._fan_row.append(self._fan_pct_label)
+            self._fan_box.append(self._fan_row)
+            card.append(self._fan_box)
 
-            # Footer: board + RPMs + settings expander
+            # Footer: board + RPMs
             footer_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
             self._footer_info = Gtk.Label(label="", xalign=0.0, hexpand=True)
             self._footer_info.add_css_class("footer-muted")
@@ -152,13 +205,13 @@ def main(argv: list[str] | None = None) -> int:
             card.append(footer_row)
 
             # Expandable Eco & GPU drawer
-            expander = Gtk.Expander(label="Eco Saver & Graphics Settings")
+            expander = Gtk.Expander(label="Eco Saver & Hardware Settings")
             extra_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=10)
             extra_box.set_margin_top(10)
 
             self._sw_eco_save = self._make_switch_row(
                 extra_box,
-                "Eco CPU Saver (disable 5.1 GHz Turbo Boost + power EPP)",
+                "Eco CPU Saver (disable Turbo Boost + power EPP)",
                 self._on_settings_toggled,
             )
             self._sw_eco_60hz = self._make_switch_row(
@@ -237,12 +290,25 @@ def main(argv: list[str] | None = None) -> int:
                 daemon_ok = bool(state.get("daemon_connected"))
                 self._daemon_banner.set_visible(not daemon_ok)
 
+                caps = state["capabilities"]
+                tel = state["telemetry"]
+
+                # Adaptive UI capability gating for other laptop models / older kernels
+                has_pwm = bool(caps.get("has_pwm_control"))
+                has_fan_hwmon = bool(caps.get("has_hp_hwmon"))
+                self._fan_box.set_visible(has_pwm or has_fan_hwmon)
+                self._fan_row.set_sensitive(has_pwm and daemon_ok)
+                self._fan_cap.set_label("FANS" if has_pwm else "FANS (RPM READ-ONLY ON THIS KERNEL)")
+                self._dgpu_badge.set_visible(caps.get("dgpu_pci_address") is not None)
+                self._sw_auto_bat.set_sensitive(bool(caps.get("has_battery")))
+
                 prof = str(state.get("profile", "balanced"))
                 for btn, key, cls in (
                     (self._btn_eco, "eco", "active-eco"),
                     (self._btn_bal, "balanced", "active-balanced"),
                     (self._btn_perf, "performance", "active-performance"),
                 ):
+                    btn.set_sensitive(daemon_ok)
                     if prof == key:
                         btn.add_css_class(cls)
                     else:
@@ -264,8 +330,6 @@ def main(argv: list[str] | None = None) -> int:
                     self._fan_slider.set_value(max(10, min(100, fpct)))
                     self._fan_pct_label.set_label(f"{fpct}%")
 
-                tel = state["telemetry"]
-                caps = state["capabilities"]
                 parts = [f"CPU {tel['cpu_temp_c']:.0f}°C"]
                 if tel.get("igpu_temp_c") is not None:
                     parts.append(f"iGPU {tel['igpu_temp_c']:.0f}°C")
@@ -291,11 +355,12 @@ def main(argv: list[str] | None = None) -> int:
                         self._holders_label.set_visible(True)
                     else:
                         self._holders_label.set_visible(False)
-                else:
-                    self._dgpu_badge.set_label("iGPU Only")
 
-                self._fan_rpm_label.set_label(f"{tel['fan1_rpm']} / {tel['fan2_rpm']} RPM")
-                self._footer_info.set_label(f"v{__version__} · Board {caps['board_name']} · Fn+P cycles modes")
+                if tel.get("fan1_rpm") or tel.get("fan2_rpm"):
+                    self._fan_rpm_label.set_label(f"{tel['fan1_rpm']} / {tel['fan2_rpm']} RPM")
+                else:
+                    self._fan_rpm_label.set_label("")
+                self._footer_info.set_label(f"v{__version__} · Board {caps['board_name']} · {caps['scaling_driver']}")
 
                 settings = state.get("settings") or {}
                 self._sw_eco_save.set_active(bool(settings.get("eco_power_save", True)))
@@ -389,7 +454,7 @@ def main(argv: list[str] | None = None) -> int:
 
     class VictusApp(Adw.Application):
         def __init__(self) -> None:
-            super().__init__(application_id="io.github.hexdm09.VictusControl")
+            super().__init__(application_id=APP_ID)
             self._win: VictusWindow | None = None
 
         def do_startup(self) -> None:

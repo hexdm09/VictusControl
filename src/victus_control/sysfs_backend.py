@@ -19,6 +19,9 @@ from victus_control.models import (
 
 CommandRunner = Callable[[list[str]], tuple[int, str]]
 
+# Supported laptop fan hwmon drivers across HP Victus/OMEN and other Linux laptops
+_FAN_HWMON_DRIVERS = ("hp", "omen", "asus", "asus_nb_wmi", "thinkpad", "legion", "dell_smm", "applesmc")
+
 
 def _default_runner(cmd: list[str]) -> tuple[int, str]:
     try:
@@ -35,11 +38,14 @@ def _default_runner(cmd: list[str]) -> tuple[int, str]:
 
 
 class LinuxSysfsBackend:
-    """Zero-dependency Linux sysfs hardware adapter for HP Victus / OMEN laptops.
+    """Adaptive Linux sysfs hardware adapter for HP Victus / OMEN and cross-vendor laptops.
 
-    Crucial battery-life guarantee:
-    Never invokes ``nvidia-smi`` or opens ``/dev/nvidia*`` when the NVIDIA dGPU's
-    PCIe runtime power state is ``suspended`` (D3cold = 0.0 W) or when disallowed.
+    Supports:
+    - AMD Ryzen (``amd-pstate-epp`` / ``cpufreq/boost`` / ``k10temp`` / ``amdgpu``)
+    - Intel Core (``intel_pstate`` / ``intel_pstate/no_turbo`` / ``coretemp``)
+    - Legacy ``acpi-cpufreq`` governors (``schedutil``, ``powersave``, ``ondemand``, ``performance``)
+    - HP Victus S / OMEN ``hp-wmi`` hwmon (full PWM on Linux 6.19+/7.0+, graceful read-only RPM on older kernels)
+    - NVIDIA & discrete AMD/Intel GPUs (PCIe Runtime D3 ``runtime_status`` without waking sleeping dGPUs)
     """
 
     def __init__(
@@ -83,22 +89,39 @@ class LinuxSysfsBackend:
         hwmon_root = self.sys_root / "class/hwmon"
         if not hwmon_root.is_dir():
             return None
+        by_name: dict[str, Path] = {}
         for entry in sorted(hwmon_root.iterdir()):
             nm = self._read_str(entry / "name")
-            if nm in target_names:
-                return entry
+            if nm and nm not in by_name:
+                by_name[nm] = entry
+        for wanted in target_names:
+            if wanted in by_name:
+                return by_name[wanted]
         return None
 
-    def _find_nvidia_dgpu_pci(self) -> Path | None:
+    def _find_dgpu_pci(self) -> tuple[Path | None, str | None]:
+        """Locate discrete GPU PCI device (NVIDIA 0x10de, or non-boot AMD/Intel dGPU)."""
         pci_root = self.sys_root / "bus/pci/devices"
         if not pci_root.is_dir():
-            return None
+            return (None, None)
+
+        gpus: list[tuple[Path, str, str | None]] = []
         for dev in sorted(pci_root.iterdir()):
-            vendor = (self._read_str(dev / "vendor") or "").lower()
             cls = (self._read_str(dev / "class") or "").lower()
-            if vendor == "0x10de" and cls.startswith("0x03"):
-                return dev
-        return None
+            if not cls.startswith("0x03"):
+                continue
+            vendor = (self._read_str(dev / "vendor") or "").lower()
+            boot_vga = self._read_str(dev / "boot_vga")
+            gpus.append((dev, vendor, boot_vga))
+
+        for dev, vendor, _boot in gpus:
+            if vendor == "0x10de":
+                return (dev, vendor)
+        if len(gpus) >= 2:
+            for dev, vendor, boot_vga in gpus:
+                if boot_vga == "0":
+                    return (dev, vendor)
+        return (None, None)
 
     def _find_battery_dir(self) -> Path | None:
         psy_root = self.sys_root / "class/power_supply"
@@ -122,6 +145,25 @@ class LinuxSysfsBackend:
             return status == "discharging"
         return False
 
+    def _read_cpu_boost(self) -> bool | None:
+        generic_boost = self.sys_root / "devices/system/cpu/cpufreq/boost"
+        if generic_boost.exists():
+            val = self._read_int(generic_boost)
+            return bool(val) if val is not None else None
+
+        # Intel pstate uses inverted polarity: no_turbo == 0 means Turbo Boost is ON
+        intel_no_turbo = self.sys_root / "devices/system/cpu/intel_pstate/no_turbo"
+        if intel_no_turbo.exists():
+            val = self._read_int(intel_no_turbo)
+            return (val == 0) if val is not None else None
+        return None
+
+    def _has_cpu_boost_control(self) -> bool:
+        return (
+            (self.sys_root / "devices/system/cpu/cpufreq/boost").exists()
+            or (self.sys_root / "devices/system/cpu/intel_pstate/no_turbo").exists()
+        )
+
     # ---- capability probing ------------------------------------------------
 
     def probe_capabilities(self) -> HardwareCapabilities:
@@ -135,16 +177,16 @@ class LinuxSysfsBackend:
         pp_choices_raw = self._read_str(self.sys_root / "firmware/acpi/platform_profile_choices") or ""
         choices = tuple(c for c in pp_choices_raw.split() if c)
 
-        hp_hwmon = self._find_hwmon_by_name(("hp",))
-        has_pwm = hp_hwmon is not None and (hp_hwmon / "pwm1_enable").exists()
+        fan_hwmon = self._find_hwmon_by_name(_FAN_HWMON_DRIVERS)
+        has_pwm = fan_hwmon is not None and (fan_hwmon / "pwm1_enable").exists()
 
         cpu0 = self.sys_root / "devices/system/cpu/cpu0/cpufreq"
         scaling_driver = self._read_str(cpu0 / "scaling_driver") or "unknown"
         has_epp = (cpu0 / "energy_performance_preference").exists()
-        has_boost = (self.sys_root / "devices/system/cpu/cpufreq/boost").exists()
+        has_boost = self._has_cpu_boost_control()
 
         bat_dir = self._find_battery_dir()
-        dgpu_dir = self._find_nvidia_dgpu_pci()
+        dgpu_dir, _ = self._find_dgpu_pci()
 
         return HardwareCapabilities(
             vendor=vendor,
@@ -153,7 +195,7 @@ class LinuxSysfsBackend:
             bios_version=bios,
             has_platform_profile=pp_file.exists(),
             platform_profile_choices=choices,
-            has_hp_hwmon=hp_hwmon is not None,
+            has_hp_hwmon=fan_hwmon is not None,
             has_pwm_control=has_pwm,
             has_cpu_boost=has_boost,
             has_epp=has_epp,
@@ -168,22 +210,21 @@ class LinuxSysfsBackend:
     def read_telemetry(self, allow_nvidia_smi: bool = False) -> TelemetrySnapshot:
         pp = self._read_str(self.sys_root / "firmware/acpi/platform_profile") or "balanced"
 
-        cpu_temp = self._read_hwmon_temp_c(("k10temp", "coretemp", "zenpower")) or 0.0
-        igpu_temp = self._read_hwmon_temp_c(("amdgpu",))
+        cpu_temp = self._read_hwmon_temp_c(("k10temp", "coretemp", "zenpower", "cpu_thermal", "acpitz")) or 0.0
+        igpu_temp = self._read_hwmon_temp_c(("amdgpu", "i915", "xe"))
         nvme_temp = self._read_hwmon_temp_c(("nvme",))
 
-        hp_hwmon = self._find_hwmon_by_name(("hp",))
-        fan1 = self._read_int(hp_hwmon / "fan1_input") if hp_hwmon else None
-        fan2 = self._read_int(hp_hwmon / "fan2_input") if hp_hwmon else None
-        pwm_en = self._read_int(hp_hwmon / "pwm1_enable") if hp_hwmon else None
-        pwm_raw = self._read_int(hp_hwmon / "pwm1") if hp_hwmon else None
+        fan_hwmon = self._find_hwmon_by_name(_FAN_HWMON_DRIVERS)
+        fan1 = self._read_int(fan_hwmon / "fan1_input") if fan_hwmon else None
+        fan2 = self._read_int(fan_hwmon / "fan2_input") if fan_hwmon else None
+        pwm_en = self._read_int(fan_hwmon / "pwm1_enable") if fan_hwmon else None
+        pwm_raw = self._read_int(fan_hwmon / "pwm1") if fan_hwmon else None
         pwm_pct = pwm_to_percent(pwm_raw) if pwm_raw is not None else None
 
         cpu0 = self.sys_root / "devices/system/cpu/cpu0/cpufreq"
         gov = self._read_str(cpu0 / "scaling_governor")
         epp = self._read_str(cpu0 / "energy_performance_preference")
-        boost_int = self._read_int(self.sys_root / "devices/system/cpu/cpufreq/boost")
-        boost = bool(boost_int) if boost_int is not None else None
+        boost = self._read_cpu_boost()
 
         bat_dir = self._find_battery_dir()
         on_bat = self._is_on_battery(bat_dir)
@@ -191,22 +232,23 @@ class LinuxSysfsBackend:
         bat_pct = self._read_int(bat_dir / "capacity") if bat_dir else None
         bat_watts = self._read_battery_watts(bat_dir, bat_status) if bat_dir else None
 
-        dgpu_dir = self._find_nvidia_dgpu_pci()
+        dgpu_dir, dgpu_vendor = self._find_dgpu_pci()
         dgpu_state = self._read_str(dgpu_dir / "power/runtime_status") if dgpu_dir else None
         dgpu_temp: float | None = None
         dgpu_holders: tuple[str, ...] = ()
 
         if dgpu_state == "active":
-            dgpu_holders = self._detect_dgpu_holders()
-            if allow_nvidia_smi:
-                rc, out = self._run(
-                    ["nvidia-smi", "--query-gpu=temperature.gpu", "--format=csv,noheader,nounits"]
-                )
-                if rc == 0 and out.strip():
-                    try:
-                        dgpu_temp = float(out.strip().splitlines()[0])
-                    except ValueError:
-                        dgpu_temp = None
+            if dgpu_vendor == "0x10de":
+                dgpu_holders = self._detect_dgpu_holders()
+                if allow_nvidia_smi:
+                    rc, out = self._run(
+                        ["nvidia-smi", "--query-gpu=temperature.gpu", "--format=csv,noheader,nounits"]
+                    )
+                    if rc == 0 and out.strip():
+                        try:
+                            dgpu_temp = float(out.strip().splitlines()[0])
+                        except ValueError:
+                            dgpu_temp = None
 
         prime_mode = self._read_str(Path("/etc/prime-discrete"))
 
@@ -287,13 +329,25 @@ class LinuxSysfsBackend:
         pp_file = self.sys_root / "firmware/acpi/platform_profile"
         if pp_file.exists():
             choices = (self._read_str(self.sys_root / "firmware/acpi/platform_profile_choices") or "").split()
-            target = profile.kernel_profile
-            if target == "low-power" and "low-power" not in choices and "quiet" in choices:
-                target = "quiet"
-            if not choices or target in choices:
+            target = self._resolve_kernel_profile(profile, choices)
+            if target is not None:
                 self._write_str(pp_file, target)
 
         self._apply_cpu_policy(profile, eco_power_save=eco_power_save)
+
+    @staticmethod
+    def _resolve_kernel_profile(profile: PowerProfile, choices: list[str]) -> str | None:
+        if not choices:
+            return profile.kernel_profile
+        candidates_map = {
+            PowerProfile.ECO: ("low-power", "quiet", "cool", "balanced"),
+            PowerProfile.BALANCED: ("balanced", "balanced-performance"),
+            PowerProfile.PERFORMANCE: ("performance", "balanced-performance", "balanced"),
+        }
+        for candidate in candidates_map[profile]:
+            if candidate in choices:
+                return candidate
+        return None
 
     def _apply_cpu_policy(self, profile: PowerProfile, eco_power_save: bool) -> None:
         cpu_root = self.sys_root / "devices/system/cpu"
@@ -301,21 +355,21 @@ class LinuxSysfsBackend:
             return
 
         if profile is PowerProfile.ECO and eco_power_save:
-            target_gov = "powersave"
+            gov_prefs = ("powersave", "schedutil", "ondemand")
             target_epp = "power"
-            target_boost = "0"
+            enable_boost = False
         elif profile is PowerProfile.ECO:
-            target_gov = "powersave"
+            gov_prefs = ("powersave", "schedutil", "ondemand")
             target_epp = "balance_power"
-            target_boost = "1"
+            enable_boost = True
         elif profile is PowerProfile.BALANCED:
-            target_gov = "powersave"
+            gov_prefs = ("powersave", "schedutil", "ondemand")
             target_epp = "balance_performance"
-            target_boost = "1"
+            enable_boost = True
         else:
-            target_gov = "powersave"
+            gov_prefs = ("powersave", "performance", "schedutil")
             target_epp = "performance"
-            target_boost = "1"
+            enable_boost = True
 
         for entry in sorted(cpu_root.iterdir()):
             if not (entry.name.startswith("cpu") and entry.name[3:].isdigit()):
@@ -324,23 +378,31 @@ class LinuxSysfsBackend:
             gov_file = cpufreq / "scaling_governor"
             epp_file = cpufreq / "energy_performance_preference"
             if gov_file.exists():
-                self._write_str(gov_file, target_gov)
+                avail_govs = (self._read_str(cpufreq / "scaling_available_governors") or "").split()
+                # Without EPP (e.g. acpi-cpufreq), PERFORMANCE uses 'performance' governor directly
+                prefs = ("performance", "schedutil", "powersave") if (profile is PowerProfile.PERFORMANCE and not epp_file.exists()) else gov_prefs
+                chosen_gov = next((g for g in prefs if not avail_govs or g in avail_govs), None)
+                if chosen_gov is not None:
+                    self._write_str(gov_file, chosen_gov)
             if epp_file.exists():
                 avail = (self._read_str(cpufreq / "energy_performance_available_preferences") or "").split()
                 if not avail or target_epp in avail:
                     self._write_str(epp_file, target_epp)
 
         boost_file = cpu_root / "cpufreq/boost"
+        intel_no_turbo = cpu_root / "intel_pstate/no_turbo"
         if boost_file.exists():
-            self._write_str(boost_file, target_boost)
+            self._write_str(boost_file, "1" if enable_boost else "0")
+        elif intel_no_turbo.exists():
+            self._write_str(intel_no_turbo, "0" if enable_boost else "1")
 
     def set_fan_mode(self, mode: FanMode, percent: int = 0) -> None:
-        hp_hwmon = self._find_hwmon_by_name(("hp",))
-        if hp_hwmon is None or not (hp_hwmon / "pwm1_enable").exists():
-            raise ValidationError("HP hwmon PWM fan interface not available on this kernel/board.")
+        fan_hwmon = self._find_hwmon_by_name(_FAN_HWMON_DRIVERS)
+        if fan_hwmon is None or not (fan_hwmon / "pwm1_enable").exists():
+            raise ValidationError("PWM fan control is not supported by this laptop's kernel driver (upgrade to Linux 6.19+ for HP Victus/OMEN).")
 
-        enable_file = hp_hwmon / "pwm1_enable"
-        pwm_file = hp_hwmon / "pwm1"
+        enable_file = fan_hwmon / "pwm1_enable"
+        pwm_file = fan_hwmon / "pwm1"
 
         if mode is FanMode.AUTO:
             self._write_str(enable_file, "2")

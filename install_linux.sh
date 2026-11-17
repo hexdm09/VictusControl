@@ -3,6 +3,7 @@ set -euo pipefail
 
 INSTALL_DIR="/opt/victus-control"
 SERVICE_NAME="victus-controld.service"
+APP_ID="io.github.hexdm09.VictusControl"
 REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 if [[ "${1:-}" == "--uninstall" ]]; then
@@ -11,7 +12,9 @@ if [[ "${1:-}" == "--uninstall" ]]; then
     sudo rm -f "/etc/systemd/system/$SERVICE_NAME"
     sudo systemctl daemon-reload
     sudo rm -f /usr/local/bin/victusctl /usr/local/bin/victusd /usr/local/bin/victus-control-gui
-    sudo rm -f /usr/share/applications/victus-control.desktop
+    sudo rm -f "/usr/share/applications/${APP_ID}.desktop" /usr/share/applications/victus-control.desktop
+    sudo rm -f "/usr/share/icons/hicolor/scalable/apps/${APP_ID}.svg"
+    sudo gtk-update-icon-cache -f -t /usr/share/icons/hicolor 2>/dev/null || true
     sudo rm -rf "$INSTALL_DIR"
     echo "[VictusControl] Uninstalled cleanly."
     exit 0
@@ -44,7 +47,13 @@ EOF
 
 sudo chmod +x /usr/local/bin/victusctl /usr/local/bin/victusd /usr/local/bin/victus-control-gui
 sudo cp "$REPO_DIR/systemd/$SERVICE_NAME" "/etc/systemd/system/$SERVICE_NAME"
-sudo cp "$REPO_DIR/desktop/victus-control.desktop" /usr/share/applications/victus-control.desktop
+
+sudo mkdir -p /usr/share/icons/hicolor/scalable/apps /usr/share/applications
+sudo cp "$REPO_DIR/src/victus_control/ui/icons/hicolor/scalable/apps/${APP_ID}.svg" \
+    "/usr/share/icons/hicolor/scalable/apps/${APP_ID}.svg"
+sudo rm -f /usr/share/applications/victus-control.desktop
+sudo cp "$REPO_DIR/desktop/${APP_ID}.desktop" "/usr/share/applications/${APP_ID}.desktop"
+sudo gtk-update-icon-cache -f -t /usr/share/icons/hicolor 2>/dev/null || true
 
 sudo systemctl daemon-reload
 sudo systemctl enable --now "$SERVICE_NAME"

@@ -171,6 +171,52 @@ class LinuxSysfsBackendTests(unittest.TestCase):
         self.backend.set_fan_mode(FanMode.AUTO)
         self.assertEqual((self.sys_root / "class/hwmon/hwmon6/pwm1_enable").read_text().strip(), "2")
 
+    def test_intel_pstate_and_older_kernel_compatibility(self) -> None:
+        # Simulate an Intel Core laptop (intel_pstate/no_turbo, coretemp, quiet profile, AMD dGPU, no pwm1_enable)
+        with tempfile.TemporaryDirectory() as tmp:
+            isys = Path(tmp) / "sys"
+            def w(rel: str, val: str) -> None:
+                p = isys / rel
+                p.parent.mkdir(parents=True, exist_ok=True)
+                p.write_text(val, encoding="utf-8")
+
+            w("devices/virtual/dmi/id/sys_vendor", "HP\n")
+            w("devices/virtual/dmi/id/board_name", "8BAA\n")
+            w("firmware/acpi/platform_profile_choices", "quiet balanced performance\n")
+            w("firmware/acpi/platform_profile", "balanced\n")
+            w("class/hwmon/hwmon1/name", "coretemp\n")
+            w("class/hwmon/hwmon1/temp1_input", "51000\n")
+            w("class/hwmon/hwmon2/name", "hp\n")
+            w("class/hwmon/hwmon2/fan1_input", "2200\n")
+            w("devices/system/cpu/cpu0/cpufreq/scaling_driver", "intel_pstate\n")
+            w("devices/system/cpu/cpu0/cpufreq/scaling_governor", "powersave\n")
+            w("devices/system/cpu/cpu0/cpufreq/energy_performance_preference", "balance_performance\n")
+            w("devices/system/cpu/intel_pstate/no_turbo", "0\n")
+            # Dual GPU: Intel iGPU (boot_vga=1) + AMD Radeon RX dGPU (boot_vga=0)
+            w("bus/pci/devices/0000:00:02.0/vendor", "0x8086\n")
+            w("bus/pci/devices/0000:00:02.0/class", "0x030000\n")
+            w("bus/pci/devices/0000:00:02.0/boot_vga", "1\n")
+            w("bus/pci/devices/0000:03:00.0/vendor", "0x1002\n")
+            w("bus/pci/devices/0000:03:00.0/class", "0x038000\n")
+            w("bus/pci/devices/0000:03:00.0/boot_vga", "0\n")
+            w("bus/pci/devices/0000:03:00.0/power/runtime_status", "suspended\n")
+
+            ibackend = LinuxSysfsBackend(sys_root=isys, command_runner=lambda _: (1, ""))
+            caps = ibackend.probe_capabilities()
+            self.assertTrue(caps.has_cpu_boost)
+            self.assertFalse(caps.has_pwm_control)
+            self.assertTrue(caps.has_hp_hwmon)
+            self.assertEqual(caps.dgpu_pci_address, "0000:03:00.0")
+
+            ibackend.apply_profile(PowerProfile.ECO, eco_power_save=True)
+            self.assertEqual((isys / "firmware/acpi/platform_profile").read_text().strip(), "quiet")
+            # Intel no_turbo == 1 means Turbo Boost is OFF in Eco!
+            self.assertEqual((isys / "devices/system/cpu/intel_pstate/no_turbo").read_text().strip(), "1")
+            snap = ibackend.read_telemetry()
+            self.assertFalse(snap.cpu_boost_enabled)
+            self.assertEqual(snap.cpu_temp_c, 51.0)
+            self.assertEqual(snap.dgpu_power_state, "suspended")
+
 
 if __name__ == "__main__":
     unittest.main()
