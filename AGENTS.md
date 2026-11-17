@@ -1,114 +1,16 @@
-# AGENTS.md — инструкция для ИИ-ассистента по проекту VictusControl
+# AGENTS.md — инструкция по Linux-ветке VictusControl
 
-Прочитай это перед любыми изменениями. Документ — единая точка входа: он описывает,
-что за проект, как он устроен, что уже проверено на железе и какие ошибки нельзя
-вносить повторно. Детали протокола: `docs/ARCHITECTURE.md`, история дефектов: `docs/AUDIT.md`.
+Эта ветка (`linux`) содержит нативную Linux-версию VictusControl (Python 3.11+, 0 внешних pip-зависимостей, GTK4 + Libadwaita + `systemd` демон `victusd` + `victusctl` CLI). Отдельная Windows-версия (C# / .NET 9 WPF) находится в ветке `windows`.
 
-## 1. Что это
+## Архитектурные инварианты (НЕ нарушать)
 
-VictusControl — лёгкая замена OMEN Gaming Hub для ноутбуков HP Victus/OMEN.
-C# / .NET 9, три проекта:
-
-| Проект | Выход | Назначение |
-|---|---|---|
-| `src/VictusControl.Core` | библиотека | WMI-клиент `hpqBIntM`, профили, capability-пробник, автозапуск |
-| `src/VictusControl.Cli` | `VictusControl.exe` | консольный клиент для скриптов |
-| `src/VictusControl.App` | `VictusControlTray.exe` | WPF-виджет + трей + OSD + хоткеи |
-| `tests/VictusControl.Core.Tests` | xunit | 69 тестов, протокол тестируется через `FakeHpWmiClient` |
-| `tools/IconGen` | генератор | one-shot генератор `app.ico` (не в sln) |
-
-UI — компактный виджет-карточка (~450×240, референс: `VictusControl_v33_Standalone.exe`
-в корне — файл пользователя, НЕ удалять): пилюли ECO/BALANCED/PERF, строка вентиляторов,
-шеврон раскрывает графику и настройки. Трей — WinForms `NotifyIcon` (единственный WinForms-
-элемент, всё остальное WPF).
-
-## 2. ⚠️ Известная проблема: автоуправление кулерами некорректно
-
-**Подтверждено пользователем 2026-10-25 на живом железе:** автоматическое управление
-вентиляторами работает некорректно. Ручной процент (`0x2E`, ползунок) — работает.
-Не работает / работает неправильно именно автоматический контур:
-
-- возврат на авто-кривую прошивки после ручного режима (`SetMaxFan(false)` = `0x27` off
-  + сброс `[0x00,0x00]` в `0x2E`);
-- re-assert режима при каждом apply/keep-alive (`AppEngine.ReassertFanMode` — флаг
-  `_fanOverrideActive`, early-return в Auto);
-- коалесценция Max→Manual(100) и Manual→Max на платах без `0x27`/`0x2D`.
-
-**Правила для ИИ:**
-1. Не «чинить» вслепую — сначала воспроизвести на железе: `dist\VictusControl.exe --fan auto`,
-   затем HWiNFO64: сбрасываются ли обороты в авто-кривую реально.
-2. Не удалять двойную посылку и армирование `0x10` — на них держится ручной режим.
-3. Гипотезы для проверки: (а) прошивка игнорирует `[0x00,0x00]`-сброс и требует
-   `0x2E [0,0,0,0]` (4 байта); (б) армирование `0x10` нужно перед КАЖДЫМ `0x2E`,
-   включая возврат в авто; (в) keep-alive каждые 75 с перезаписывает авто-режим,
-   который прошивка сама сбрасывает.
-4. После правки: обновить этот раздел и `docs/AUDIT.md`, прогнать тесты и живую проверку.
-
-## 3. Протокол WMI (менять только по данным OmenMon/живых тестов)
-
-Метод: `root\wmi` → класс `hpqBIntM`, вход `hpqBDataIn` (`Sign`="SECU", `Command`=модуль),
-выход `hpqBIOSInt{0,4,128}`. Модули: Gaming=`0x20008`, Legacy=`0x1` (чтение 0x52),
-GpuMode=`0x2` (запись 0x52).
-
-| Субкоманда | Назначение | Payload | Метод | Нюансы |
-|---|---|---|---|---|
-| 0x1A | режим обдува | `[0xFF, code, 0, 0]` | Int0 | коды: Modern 0x50/0x30/0x31, Legacy 0x03/0x00/0x01 |
-| 0x21/0x22 | GPU cTGP+PPAB read/write | `[cTGP,PPAB,DState,Temp]` | Int4/Int0 | **писать дважды с паузой 50 мс** (VRM игнорирует первую) |
-| 0x28 | термополитика | пусто | Int128 | байт 3: 0x01=Modern, 0x00=Legacy; неизвестный байт → Legacy **только через `NotSupportedException`** (транспортные ошибки пробрасывать!) |
-| 0x10 | армирование ручного вентилятора | `[0x00]` (4 байта тоже ок, проверено) | Int4 | нужен перед каждым ручным режимом |
-| 0x2D | уровни вентиляторов | пусто | **Int128** | **через Int4 даёт ложное «не поддерживается»** |
-| 0x2E | процент вентиляторов | `[f1, f2, 0, 0]` (0=авто) | Int0 | сброс авто на Victus S: доп. посылка `[0x00,0x00]` |
-| 0x27 | max fan | `[1,0,0,0]`/`[0,0,0,0]` | Int0 | rc при выключении игнорируется сознательно |
-| 0x52 | Hybrid/Discrete | read: пусто (Legacy) / write: `[mode,0,0,0]` (GpuMode) | Int4/Int0 | **BIOS-настройка, применяется после перезагрузки**; ошибка 4 = нет свича |
-| 0x23 | температуры | `[sensor,0,0,0]` | Int4 | sensor 0=CPU, 1=GPU |
-| 0x26 | чтение max-fan состояния | пусто | Int4 | используется в probe |
-
-События: Fn+P/OMEN-клавиша = `hpqBEvnt`, eventId 27/29 (`HotkeyManager`).
-
-## 4. Архитектура приложения
-
-- `AppEngine` (бывш. TrayContext) — единый оркестратор: очереди применения (коалесценция
-  «последний выигрывает»), **глобальный `SemaphoreSlim(1,1)` на ВСЕ WMI-последовательности**
-  (EC — один ACPI-почтовый ящик; параллельные вызовы = гонки), keep-alive 75 с, опрос
-  датчиков 2 с (останавливается при скрытом окне), capability-проб при старте.
-- `CapabilityProbe` — один read-only проход по читаемым командам → `BiosCapabilities`;
-  UI скрывает неподдержанные секции. Проба `0x2D` обязана идти через Int128.
-- `MainWindow` (WPF) — виджет; `OsdWindow` — gamesafe-оверлей (WS_EX_NOACTIVATE);
-  `HotkeyManager` — WMI-события + резервный Ctrl+Shift+P.
-- Настройки: `%LocalAppData%\VictusControl\settings.json`; crash.log — туда же, аппендом.
-- Одиночный экземпляр: мьютекс `Global\VictusControl` + сигнал
-  `Local\VictusControlShowWindow` (вторая копия «будит» первую — работает и при скрытом окне).
-- Автозапуск: задача планировщика `VictusControl` + XDocument-патч батареи с верификацией.
-
-## 5. Команды
-
-```bash
-dotnet test VictusControl.sln -c Release        # 69 тестов, все должны быть зелёные
-dotnet publish src/VictusControl.App -c Release -o dist
-dotnet publish src/VictusControl.Cli -c Release -o dist
-```
-
-Живая проверка (машина пользователя = HP Victus 16-s1xxx RTX 4070, thermal policy Modern):
-`dist\VictusControl.exe --info` (отчёт платы), `--get/--set/--cycle`, `--fan max|auto|<1-100>`,
-`--gpumode`, коды выхода: 0/1 (прошивка)/2 (аргументы). Скриншоты окна — только по hwnd
-с `SetProcessDPIAware` (см. историю: заголовок окна `VICTUS CONTROL`).
-
-## 6. Грабли (уже наступали — не повторять)
-
-- FanSlider `ValueChanged` стреляет во время XAML-парсинга → null-guard обязателен.
-- WPF + WinForms в одном проекте: `Application`, `Brush` и др. двусмысленны —
-  использовать `System.Windows.`/алиас `WinForms = System.Windows.Forms`.
-- После смены XAML чистить `obj` (stale BAML даёт «ресурс не найден»).
-- Shell-обёртка ломается от `;`/`&&` после dotnet-команд; `$` в PowerShell-инлайн
-  съедается — сложное писать в .ps1 файл.
-- Анализ скриншотов через CDN-превью: обратные слэши в пути ломают URL; передавать
-  изображение через `nodeRepl.emitImage` и брать чистый URL из результата.
-- UI-текст документации не редактировать PowerShell-`-replace` с кавычками — портит
-  юникод. Использовать Edit-инструмент.
-- CI: теги с alpha/beta/rc → prerelease; pdb в архив не включать.
-- `docs/AUDIT.md` — журнал двух полных аудитов; новые находки дописывать туда.
-
-## 7. Релизы
-
-Пуш в `main` → CI тестирует и публикует артефакт. Релиз = тег `v*` (сейчас v0.0.2-alpha).
-Активный релиз: https://github.com/hexdm09/VictusControl/releases/tag/v0.0.2-alpha
+1. **Никогда не будить спящую NVIDIA dGPU в `ECO` или при `runtime_status == "suspended"`**:
+   - Чтение статуса dGPU идёт строго через `/sys/bus/pci/devices/0000:01:00.0/power/runtime_status`. Запрещено вызывать `nvidia-smi` или открывать `/dev/nvidia*`, когда карта в `suspended` (`D3cold`).
+2. **Никаких прямых записей в порты EC (`/dev/port` / `ec_sys`) в обход ядра**:
+   - Ядро Linux 6.19+/7.0+ (`hp-wmi`) уже содержит нативную поддержку платы `8C9C` (`victus_s`), включая таблицу `0x2F`, `gpu_delta` и 90-секундный keep-alive workqueue. Все операции выполняются только через `sysfs` (`platform_profile`, `hwmon/pwm1_enable`, `hwmon/pwm1`, `amd-pstate-epp`, `cpufreq/boost`).
+3. **Fail-Safe возврат кулеров в `Auto` (`pwm1_enable = 2`)**:
+   - При завершении `victusd` (`VictusController.shutdown()` и `ExecStopPost` в `systemd/victus-controld.service`) кулеры обязаны возвращаться в `2` (`BIOS Auto`).
+4. **Проверка перед коммитом**:
+   ```bash
+   PYTHONPATH=src:. python3 -m unittest discover -s tests -v
+   ```

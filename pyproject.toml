@@ -1,0 +1,21 @@
+[build-system]
+requires = ["setuptools>=68.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "victus-control"
+version = "0.2.0"
+description = "Native Linux power profile, fan curve, and dGPU/Eco battery controller for HP Victus & OMEN laptops"
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "MIT" }
+authors = [{ name = "hexdm09" }]
+dependencies = []
+
+[project.scripts]
+victusctl = "victus_control.cli:main"
+victusd = "victus_control.daemon:main"
+victus-control-gui = "victus_control.ui.app:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]

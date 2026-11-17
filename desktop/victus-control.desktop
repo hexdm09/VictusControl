@@ -1,0 +1,10 @@
+[Desktop Entry]
+Type=Application
+Name=VictusControl
+Comment=Power profiles, fan curve, and Eco battery saver for HP Victus & OMEN
+Exec=/usr/local/bin/victus-control-gui
+Icon=utilities-system-monitor
+Terminal=false
+Categories=System;Settings;HardwareSettings;
+Keywords=HP;Victus;OMEN;Fan;Power;Eco;GPU;
+StartupNotify=true

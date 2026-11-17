@@ -1,24 +1,10 @@
-bin/
-obj/
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+build/
 dist/
-dist_check/
-.vs/
-*.user
-
-# local analysis artifacts
-*.log
-crash.log
-
-# local session state and release archives
-.zcode/
-VictusControl-*.zip
-VictusControl-source.zip
-
-# stray root build outputs (build into dist/ instead)
-/*.exe
-/*.pdb
-/*.dll
-
-# unrelated local projects kept out of the repository
-/vinted_bot/
-vinted_bot.zip
+.venv/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/

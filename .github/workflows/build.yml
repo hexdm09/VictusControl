@@ -1,4 +1,4 @@
-name: build
+name: build-linux
 
 on:
   push:
@@ -8,37 +8,16 @@ permissions:
   contents: read
 
 jobs:
-  build:
-    runs-on: windows-latest
+  test:
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/setup-dotnet@v4
+      - uses: actions/setup-python@v5
         with:
-          dotnet-version: 9.0.x
-      - run: dotnet test VictusControl.sln -c Release
-      - run: dotnet publish src/VictusControl.Cli -c Release -o dist
-      - run: dotnet publish src/VictusControl.App -c Release -o dist
-      - uses: actions/upload-artifact@v4
-        with:
-          name: dist
-          path: dist/
-
-  release:
-    if: startsWith(github.ref, 'refs/tags/')
-    needs: build
-    runs-on: windows-latest
-    permissions:
-      contents: write
-    steps:
-      - uses: actions/download-artifact@v4
-        with:
-          name: dist
-          path: dist
-      - name: Create release archive
-        shell: pwsh
-        run: Compress-Archive -Path dist/*.exe, dist/*.dll -DestinationPath VictusControl-${{ github.ref_name }}.zip
-      - name: Upload to Release
-        uses: softprops/action-gh-release@v2
-        with:
-          files: VictusControl-*.zip
-          prerelease: ${{ contains(github.ref_name, 'alpha') || contains(github.ref_name, 'beta') || contains(github.ref_name, 'rc') }}
+          python-version: "3.12"
+      - name: Compile-check all Python modules
+        run: python3 -m compileall -q src tests
+      - name: Run unit and integration test suite
+        env:
+          PYTHONPATH: src:.
+        run: python3 -m unittest discover -s tests -v

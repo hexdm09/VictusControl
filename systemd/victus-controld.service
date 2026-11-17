@@ -1,0 +1,21 @@
+[Unit]
+Description=VictusControl Hardware Power & Fan Daemon for HP Victus/OMEN
+After=multi-user.target systemd-udevd.service
+
+[Service]
+Type=simple
+Environment=PYTHONPATH=/opt/victus-control/src
+RuntimeDirectory=victus-control
+RuntimeDirectoryMode=0755
+StateDirectory=victus-control
+StateDirectoryMode=0755
+# Reset stuck manual PWM back to BIOS Auto (2) on service startup
+ExecStartPre=-/bin/sh -c 'for f in /sys/devices/platform/hp-wmi/hwmon/hwmon*/pwm1_enable; do [ -w "$f" ] && echo 2 > "$f"; done'
+ExecStart=/usr/bin/python3 -m victus_control.daemon --socket /run/victus-control/victusd.sock --settings /var/lib/victus-control/settings.json
+# Fail-safe: guarantee fans return to BIOS Auto curve even if the process crashes
+ExecStopPost=-/bin/sh -c 'for f in /sys/devices/platform/hp-wmi/hwmon/hwmon*/pwm1_enable; do [ -w "$f" ] && echo 2 > "$f"; done'
+Restart=on-failure
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target
