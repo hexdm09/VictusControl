@@ -22,3 +22,6 @@ VictusControl-source.zip
 # unrelated local projects kept out of the repository
 /vinted_bot/
 vinted_bot.zip
+
+__pycache__/
+*.py[cod]

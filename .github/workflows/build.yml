@@ -36,9 +36,9 @@ jobs:
           path: dist
       - name: Create release archive
         shell: pwsh
-        run: Compress-Archive -Path dist/*.exe, dist/*.dll -DestinationPath VictusControl-${{ github.ref_name }}.zip
+        run: Compress-Archive -Path dist/*.exe, dist/*.dll -DestinationPath VictusControl-windows-${{ github.ref_name }}.zip
       - name: Upload to Release
         uses: softprops/action-gh-release@v2
         with:
-          files: VictusControl-*.zip
+          files: VictusControl-windows-*.zip
           prerelease: ${{ contains(github.ref_name, 'alpha') || contains(github.ref_name, 'beta') || contains(github.ref_name, 'rc') }}

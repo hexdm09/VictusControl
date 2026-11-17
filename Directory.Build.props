@@ -3,7 +3,7 @@
     <LangVersion>13</LangVersion>
     <UseRidGraph>true</UseRidGraph>
 
-    <Version>0.1.0</Version>
+    <Version>0.0.3</Version>
     <Authors>hexdm09</Authors>
     <Product>VictusControl</Product>
     <Description>Lightweight OMEN Gaming Hub replacement for HP Victus/OMEN laptops (Windows)</Description>

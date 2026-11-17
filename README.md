@@ -6,7 +6,7 @@
 [![Release](https://img.shields.io/github/v/release/hexdm09/VictusControl)](https://github.com/hexdm09/VictusControl/releases)
 [![License](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
-> Статус: версия v0.0.1-alpha. Поддерживает Windows 10/11 x64 с включенной изоляцией ядра (HVCI). Протестировано на HP Victus 16-s1xxx с NVIDIA GeForce RTX 4070 Laptop.
+> Статус: версия **v0.0.3 (Windows Edition, ветка `windows`)**. Поддерживает Windows 10/11 x64 с включенной изоляцией ядра (HVCI). Отдельная нативная версия для Linux находится в ветке `linux`. Протестировано на HP Victus 16-s1xxx (`8C9C`) с NVIDIA GeForce RTX 4070 Laptop.
 
 ---
 

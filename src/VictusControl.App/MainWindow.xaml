@@ -164,7 +164,7 @@
             </StackPanel>
 
             <!-- version line -->
-            <TextBlock Grid.Row="5" x:Name="VersionNote" Text="v0.1.0 (Windows)" FontSize="9"
+            <TextBlock Grid.Row="5" x:Name="VersionNote" Text="v0.0.3 (Windows)" FontSize="9"
                        Foreground="{StaticResource TextFaint}" Margin="2,10,0,0" />
         </Grid>
     </Border>
