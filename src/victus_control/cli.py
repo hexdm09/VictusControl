@@ -6,6 +6,7 @@ from pathlib import Path
 import sys
 from typing import Any
 
+from victus_control import __version__
 from victus_control.display import DisplayRefreshManager
 from victus_control.ipc import DEFAULT_SOCKET_PATH, VictusIpcClient
 from victus_control.models import FanMode, PowerProfile, ValidationError, VictusError
@@ -73,6 +74,7 @@ def main(argv: list[str] | None = None, socket_path: Path = DEFAULT_SOCKET_PATH)
         prog="victusctl",
         description="VictusControl Linux CLI — manage power profiles, fans, display Hz, and dGPU sleep",
     )
+    parser.add_argument("--version", action="version", version=f"VictusControl {__version__} (Linux)")
     parser.add_argument("--status", action="store_true", help="Show live profile, fans, temperatures, dGPU & battery")
     parser.add_argument("--info", action="store_true", help="Show hardware capability report")
     parser.add_argument("--get", action="store_true", help="Show active power profile")

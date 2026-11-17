@@ -5,6 +5,7 @@ import sys
 import threading
 from typing import Any
 
+from victus_control import __version__
 from victus_control.display import DisplayRefreshManager
 from victus_control.ipc import DEFAULT_SOCKET_PATH, VictusIpcClient
 from victus_control.models import FanMode, PowerProfile, VictusError
@@ -294,7 +295,7 @@ def main(argv: list[str] | None = None) -> int:
                     self._dgpu_badge.set_label("iGPU Only")
 
                 self._fan_rpm_label.set_label(f"{tel['fan1_rpm']} / {tel['fan2_rpm']} RPM")
-                self._footer_info.set_label(f"Board {caps['board_name']} · Fn+P cycles modes")
+                self._footer_info.set_label(f"v{__version__} · Board {caps['board_name']} · Fn+P cycles modes")
 
                 settings = state.get("settings") or {}
                 self._sw_eco_save.set_active(bool(settings.get("eco_power_save", True)))

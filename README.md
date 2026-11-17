@@ -1,4 +1,4 @@
-# VictusControl (Linux Edition)
+# VictusControl v0.0.3 (Linux Edition)
 
 Нативная замена OMEN Gaming Hub для ноутбуков **HP Victus / OMEN** под Linux (Ubuntu 24.04 / 26.04+, ядро Linux 6.19+ / 7.0+ с апстримным драйвером `hp-wmi`).
 
