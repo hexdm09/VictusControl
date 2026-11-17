@@ -27,14 +27,14 @@ if (help)
 {
     Console.WriteLine("Usage:");
     Console.WriteLine("  VictusControl --get                      Show active profile (from GPU cTGP/PPAB)");
-    Console.WriteLine("  VictusControl --set eco|balanced|perf   Apply a profile");
+    Console.WriteLine("  VictusControl --set eco|balanced|perf    Apply a profile");
     Console.WriteLine("  VictusControl --cycle                    Eco -> Balanced -> Performance -> Eco");
-    Console.WriteLine("  VictusControl --system                   Show thermal policy version");
+    Console.WriteLine("  VictusControl --system                   Show thermal policy & fan table");
     Console.WriteLine("  VictusControl --gpu                      Show raw GPU power state");
-    Console.WriteLine("  VictusControl --fan max|auto|<1-100>    Set fans to 100%, auto curve, or a manual percent");
+    Console.WriteLine("  VictusControl --fan max|auto|<1-100>     Set fans to 100%, BIOS auto, or scaled %");
     Console.WriteLine("  VictusControl --fans                     Show current fan speeds (RPM) and temperatures");
     Console.WriteLine("  VictusControl --temp                     Show CPU and GPU temperatures");
-    Console.WriteLine("  VictusControl --gpumode [hybrid|discrete]  Show or schedule the graphics mode (reboot to apply)");
+    Console.WriteLine("  VictusControl --gpumode [hybrid|discrete] Show or schedule graphics mode (reboot to apply)");
     Console.WriteLine("  VictusControl --info                     Probe this board and report supported features");
     Console.WriteLine("  VictusControl --autostart on|off [exe]   Task Scheduler logon task (HighestAvailable)");
     Console.WriteLine("Must run elevated (Administrator) for WMI BIOS access.");
@@ -53,8 +53,11 @@ try
                 if (percent is < 1 or > 100)
                     throw new ArgumentException("Manual fan percent must be 1..100 (or use max|auto).");
                 using var client = new HpWmiClient();
-                new PowerController(client).SetFanPercent(percent, percent);
-                Console.WriteLine($"Fans: {percent}% (manual)");
+                var controller = new PowerController(client);
+                VictusFanTable table = controller.GetFanTableOrDefault();
+                var (cpuKrpm, gpuKrpm) = table.PercentToKrpm(percent, percent);
+                controller.SetFanPercent(percent, percent, table);
+                Console.WriteLine($"Fans: {percent}% -> {cpuKrpm * 100}/{gpuKrpm * 100} RPM (manual)");
                 break;
             }
             bool max = value.Equals("max", StringComparison.OrdinalIgnoreCase)
@@ -65,7 +68,7 @@ try
                 throw new ArgumentException($"Unknown fan value '{value}'. Use max|auto|<1-100>.");
             using var client2 = new HpWmiClient();
             new PowerController(client2).SetMaxFan(max);
-            Console.WriteLine(max ? "Max Fan: ON (100% speed)" : "Max Fan: OFF (Auto curve)");
+            Console.WriteLine(max ? "Max Fan: ON (100% speed)" : "Max Fan: OFF (BIOS Auto curve)");
             break;
         }
         case "--fans":
@@ -87,7 +90,10 @@ try
         case "--system":
         {
             using var client = new HpWmiClient();
-            Console.WriteLine($"ThermalPolicy: {new PowerController(client).GetThermalPolicy()}");
+            var controller = new PowerController(client);
+            ThermalPolicy pol = controller.GetThermalPolicy();
+            VictusFanTable tbl = controller.GetFanTableOrDefault();
+            Console.WriteLine($"ThermalPolicy: {pol} | FanTable: {tbl.MinKrpm * 100}..{tbl.MaxKrpm * 100} RPM (delta {tbl.GpuDelta * 100:+#;-#;0} RPM)");
             break;
         }
         case "--info":
@@ -98,6 +104,7 @@ try
             Console.WriteLine($"Thermal policy : {caps.Policy?.ToString() ?? "unknown (Legacy fallback)"}");
             Console.WriteLine($"GPU power (cTGP/PPAB): {(caps.GpuPower ? "supported" : "NOT supported")}");
             Console.WriteLine($"Fan levels (RPM/percent): {(caps.FanLevels ? "supported" : "NOT supported")}");
+            Console.WriteLine($"Victus S fan table (0x2F): {(caps.FanTable is { } ft ? $"{ft.MinKrpm * 100}..{ft.MaxKrpm * 100} RPM (GPU delta {ft.GpuDelta * 100} RPM)" : "NOT present (using default 1700..5800 RPM)")}");
             Console.WriteLine($"Temperatures  : {(caps.Temperatures ? "supported" : "NOT supported")}");
             Console.WriteLine($"Max fan mode  : {(caps.MaxFan ? "supported" : "NOT supported")}");
             Console.WriteLine($"Fan count     : {(caps.FanCount ? "supported" : "NOT supported")}");
@@ -172,7 +179,6 @@ try
 }
 catch (ArgumentException ex)
 {
-    // argument problems are the caller's fault: the documented "invalid arguments" code
     Console.Error.WriteLine($"Invalid arguments: {ex.Message}");
     return 2;
 }
@@ -204,7 +210,7 @@ static string Describe(GpuPowerData gpu) =>
 static void ApplyProfile(PowerProfile profile)
 {
     using var client = new HpWmiClient();
-    var controller = new PowerController(client);
-    controller.ApplyProfile(profile);
+    BiosCapabilities caps = CapabilityProbe.Probe(client);
+    new PowerController(client).ApplyProfile(profile, caps);
     Console.WriteLine($"Applied: {profile}");
 }

@@ -9,29 +9,52 @@ public sealed record BiosCapabilities(
     bool Temperatures,
     bool MaxFan,
     bool FanCount,
-    bool GpuModeSwitch)
+    bool GpuModeSwitch,
+    VictusFanTable? FanTable = null)
 {
-    public static BiosCapabilities None { get; } = new(null, false, false, false, false, false, false);
+    public static BiosCapabilities None { get; } = new(null, false, false, false, false, false, false, null);
 
     public ThermalPolicy EffectivePolicy => Policy ?? ThermalPolicy.Legacy;
+
+    public VictusFanTable EffectiveFanTable => FanTable ?? VictusFanTable.Default;
 }
 
 // probes readable subcommands once and maps firmware "not supported"
 // answers (and WMI faults) to feature flags instead of exceptions.
-// every probe mirrors the response size of the real call: some boards
-// reject e.g. the fan-level read when asked through hpqBIOSInt4.
 public static class CapabilityProbe
 {
+    private static readonly byte[] Zero4 = [0x00, 0x00, 0x00, 0x00];
+
     public static BiosCapabilities Probe(IHpWmiClient client)
     {
+        VictusFanTable? fanTable = ProbeFanTable(client);
+        ThermalPolicy? rawPolicy = ProbePolicy(client);
+        // Boards exposing the 0x2F Victus S fan table (e.g. 8C9C) use the VictusS 0x1A protocol
+        ThermalPolicy? policy = fanTable is not null ? ThermalPolicy.VictusS : rawPolicy;
+
         return new BiosCapabilities(
-            Policy: ProbePolicy(client),
-            GpuPower: ProbeRead(client, BiosCommand.GpuRead, [0x00, 0x00, 0x00, 0x00], 4),
+            Policy: policy,
+            GpuPower: ProbeRead(client, BiosCommand.GpuRead, Zero4, 4),
             FanLevels: ProbeRead(client, BiosCommand.VictusFanSpeedGet, null, 128),
-            Temperatures: ProbeRead(client, BiosCommand.TempRead, [0x00, 0x00, 0x00, 0x00], 4),
+            Temperatures: ProbeRead(client, BiosCommand.TempRead, Zero4, 4),
             MaxFan: ProbeRead(client, BiosCommand.MaxFanRead, null, 4),
             FanCount: ProbeRead(client, BiosCommand.FanCount, [0x00], 4),
-            GpuModeSwitch: ProbeRead(client, BiosCommand.GpuMode, null, 4, BiosModule.Legacy));
+            GpuModeSwitch: ProbeRead(client, BiosCommand.GpuMode, null, 4, BiosModule.Legacy),
+            FanTable: fanTable);
+    }
+
+    private static VictusFanTable? ProbeFanTable(IHpWmiClient client)
+    {
+        try
+        {
+            return client.Execute(BiosCommand.VictusFanTableGet, Zero4, 128, out byte[]? data) == BiosReturnCode.Ok
+                ? VictusFanTable.TryParse(data)
+                : null;
+        }
+        catch
+        {
+            return null;
+        }
     }
 
     private static ThermalPolicy? ProbePolicy(IHpWmiClient client)

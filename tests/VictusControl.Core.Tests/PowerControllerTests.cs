@@ -3,12 +3,12 @@ using Xunit;
 
 namespace VictusControl.Core.Tests;
 
-// scripted IHpWmiClient: records call order, serves canned reads
 internal sealed class FakeHpWmiClient : IHpWmiClient
 {
     public readonly List<(uint Module, BiosCommand Command, byte[]? Payload, int ResponseSize)> Calls = [];
     public byte ThermalPolicyByte = 0x01;
-    public GpuPowerData GpuState = GpuPowerData.For(PowerProfile.Performance);
+    public bool HasVictusSFanTable;
+    public GpuPowerData GpuState = GpuPowerData.For(PowerProfile.Performance, 0x57);
     public bool FailGpuWrites;
     public bool FailTempRead;
     public bool ShortFanData;
@@ -27,8 +27,14 @@ internal sealed class FakeHpWmiClient : IHpWmiClient
             response = null;
             return BiosReturnCode.NotSupported;
         }
+        if (command == BiosCommand.VictusFanTableGet && !HasVictusSFanTable)
+        {
+            response = null;
+            return BiosReturnCode.NotSupported;
+        }
         response = (module, command) switch
         {
+            (_, BiosCommand.VictusFanTableGet) => BuildSampleFanTable(),
             (_, BiosCommand.SystemRead) => SystemData(),
             (_, BiosCommand.GpuRead) => GpuState.ToPayload(),
             (_, BiosCommand.VictusFanSpeedGet) => ShortFanData ? [58] : [58, 61],
@@ -44,7 +50,6 @@ internal sealed class FakeHpWmiClient : IHpWmiClient
             return BiosReturnCode.FirmwareError6;
         if (FailGpuWrites && command == BiosCommand.GpuWrite)
             return 6;
-        // unsupported boards answer firmware error 4 on every 0x52 call (read and write)
         if (FailGpuModeModule && command == BiosCommand.GpuMode)
             return 4;
         return BiosReturnCode.Ok;
@@ -65,31 +70,61 @@ internal sealed class FakeHpWmiClient : IHpWmiClient
         data[3] = ThermalPolicyByte;
         return data;
     }
+
+    private static byte[] BuildSampleFanTable()
+    {
+        var table = new byte[128];
+        table[0] = 0x01; // header valid
+        table[1] = 0x02; // 2 fans
+        // entry 0: CPU 17 (1700 RPM), GPU 19 (1900 RPM -> delta +2)
+        table[2] = 17; table[3] = 19; table[4] = 1;
+        // entry 1: CPU 36, GPU 38
+        table[5] = 36; table[6] = 38; table[7] = 2;
+        // entry 2: CPU 58 (5800 RPM max), GPU 60
+        table[8] = 58; table[9] = 60; table[10] = 3;
+        return table;
+    }
 }
 
 public sealed class PowerControllerTests
 {
     [Fact]
-    public void ApplyProfile_CallOrder_FanMode_Gpu_Gpu_Verify()
+    public void ApplyProfile_VictusSBoard_Eco_Uses2ByteFanModePreservesPeakTempAndResetsCpuLimits()
     {
-        var fake = new FakeHpWmiClient { GpuState = GpuPowerData.For(PowerProfile.Eco) };
-        new PowerController(fake).ApplyProfile(PowerProfile.Eco);
+        var fake = new FakeHpWmiClient
+        {
+            HasVictusSFanTable = true,
+            GpuState = GpuPowerData.For(PowerProfile.Eco, 0x57),
+        };
+        BiosCapabilities caps = CapabilityProbe.Probe(fake);
+        fake.Calls.Clear();
+
+        new PowerController(fake).ApplyProfile(PowerProfile.Eco, caps);
 
         BiosCommand[] order = [.. fake.Calls.Select(c => c.Command)];
         Assert.Equal([
-            BiosCommand.SystemRead,
+            BiosCommand.FanCount,
             BiosCommand.FanMode,
+            BiosCommand.GpuRead,
             BiosCommand.GpuWrite,
             BiosCommand.GpuWrite,
             BiosCommand.GpuRead,
+            BiosCommand.CpuWrite,
         ], order);
+
+        Assert.Equal([0xFF, 0x00], fake.Calls[1].Payload);
+        Assert.Equal([0x00, 0x00, 0x01, 0x57], fake.Calls[3].Payload);
+        Assert.Equal([0x00, 0x00, 0xFF, 0xFF], fake.Calls[6].Payload);
     }
 
     [Fact]
-    public void ApplyProfile_FanModePayload_HasPrefixAndCode()
+    public void ApplyProfile_ModernNonVictusS_Performance_Sends4ByteFanMode()
     {
         var fake = new FakeHpWmiClient();
-        new PowerController(fake).ApplyProfile(PowerProfile.Performance);
+        BiosCapabilities caps = CapabilityProbe.Probe(fake);
+        fake.Calls.Clear();
+
+        new PowerController(fake).ApplyProfile(PowerProfile.Performance, caps);
 
         var fanMode = fake.Calls.First(c => c.Command == BiosCommand.FanMode);
         Assert.Equal([0xFF, 0x31, 0x00, 0x00], fanMode.Payload);
@@ -98,7 +133,6 @@ public sealed class PowerControllerTests
     [Fact]
     public void ApplyProfile_VerifyMismatch_Throws()
     {
-        // firmware stuck on Eco while Performance was requested
         var fake = new FakeHpWmiClient { GpuState = GpuPowerData.For(PowerProfile.Eco) };
         var ex = Assert.Throws<InvalidOperationException>(
             () => new PowerController(fake).ApplyProfile(PowerProfile.Performance));
@@ -115,21 +149,28 @@ public sealed class PowerControllerTests
     [Theory]
     [InlineData(0x01, ThermalPolicy.Modern)]
     [InlineData(0x00, ThermalPolicy.Legacy)]
-    public void GetThermalPolicy_Known(byte raw, ThermalPolicy expected)
+    public void GetThermalPolicy_NonVictusS_Known(byte raw, ThermalPolicy expected)
     {
         var fake = new FakeHpWmiClient { ThermalPolicyByte = raw };
         Assert.Equal(expected, new PowerController(fake).GetThermalPolicy());
     }
 
     [Fact]
+    public void GetThermalPolicy_VictusSWith0x2F_ReturnsVictusS()
+    {
+        var fake = new FakeHpWmiClient { HasVictusSFanTable = true };
+        Assert.Equal(ThermalPolicy.VictusS, new PowerController(fake).GetThermalPolicy());
+    }
+
+    [Fact]
     public void GetThermalPolicy_Unknown_Throws()
     {
-        var fake = new FakeHpWmiClient { ThermalPolicyByte = 0x02 };
+        var fake = new FakeHpWmiClient { ThermalPolicyByte = 0x07 };
         Assert.Throws<NotSupportedException>(() => new PowerController(fake).GetThermalPolicy());
     }
 
     [Fact]
-    public void SetMaxFan_True_CallsFanCountTriggerThenMaxFanWrite()
+    public void SetMaxFan_True_CallsFanCountThenMaxFanWrite()
     {
         var fake = new FakeHpWmiClient();
         new PowerController(fake).SetMaxFan(true);
@@ -140,26 +181,37 @@ public sealed class PowerControllerTests
     }
 
     [Fact]
-    public void SetMaxFan_False_CallsFanCountTriggerThenMaxFanOffAndVictusReset()
+    public void SetMaxFan_False_FollowsExactKernelAutoResetSequence()
     {
         var fake = new FakeHpWmiClient();
         new PowerController(fake).SetMaxFan(false);
 
         BiosCommand[] order = [.. fake.Calls.Select(c => c.Command)];
-        Assert.Equal([BiosCommand.FanCount, BiosCommand.MaxFanWrite, BiosCommand.VictusFanSpeedSet], order);
+        Assert.Equal([
+            BiosCommand.FanCount,
+            BiosCommand.MaxFanWrite,
+            BiosCommand.FanCount,
+            BiosCommand.VictusFanSpeedSet,
+        ], order);
         Assert.Equal([0x00, 0x00, 0x00, 0x00], fake.Calls[1].Payload);
-        Assert.Equal([0x00, 0x00], fake.Calls[2].Payload);
+        Assert.Equal([0x00, 0x00], fake.Calls[3].Payload);
     }
 
     [Fact]
-    public void SetFanPercent_CallsFanCountTriggerThenVictusFanSpeedSet()
+    public void SetFanPercent_ScalesToKrpmClearsMaxFanAndSends2BytePayloadWithGpuDelta()
     {
-        var fake = new FakeHpWmiClient();
-        new PowerController(fake).SetFanPercent(45, 45);
+        var fake = new FakeHpWmiClient { HasVictusSFanTable = true };
+        var controller = new PowerController(fake);
+        VictusFanTable table = controller.GetFanTableOrDefault();
+        fake.Calls.Clear();
+
+        controller.SetFanPercent(100, 100, table);
 
         BiosCommand[] order = [.. fake.Calls.Select(c => c.Command)];
-        Assert.Equal([BiosCommand.FanCount, BiosCommand.VictusFanSpeedSet], order);
-        Assert.Equal([45, 45, 0x00, 0x00], fake.Calls[1].Payload);
+        Assert.Equal([BiosCommand.FanCount, BiosCommand.MaxFanWrite, BiosCommand.VictusFanSpeedSet], order);
+        Assert.Equal([0x00, 0x00, 0x00, 0x00], fake.Calls[1].Payload);
+        // 100% -> CPU 58 (5800 RPM), GPU 58 + delta(2) = 60 (6000 RPM), 2-byte payload
+        Assert.Equal([58, 60], fake.Calls[2].Payload);
     }
 
     [Theory]
@@ -175,15 +227,6 @@ public sealed class PowerControllerTests
     }
 
     [Fact]
-    public void GetFanPercent_ReturnsRawLevels()
-    {
-        var fake = new FakeHpWmiClient();
-        var (p1, p2) = new PowerController(fake).GetFanPercent();
-        Assert.Equal(58, p1);
-        Assert.Equal(61, p2);
-    }
-
-    [Fact]
     public void GetFanRpm_ReturnsCorrectRpm()
     {
         var fake = new FakeHpWmiClient();
@@ -193,12 +236,13 @@ public sealed class PowerControllerTests
     }
 
     [Fact]
-    public void GetTemperatures_ReturnsCorrectTemps()
+    public void GetTemperatures_SkipGpu_DoesNotTouchGpuSensor()
     {
         var fake = new FakeHpWmiClient();
-        var (cpu, gpu) = new PowerController(fake).GetTemperatures();
+        var (cpu, gpu) = new PowerController(fake).GetTemperatures(includeGpu: false);
         Assert.Equal(38, cpu);
-        Assert.Equal(50, gpu);
+        Assert.Equal(0, gpu);
+        Assert.Single(fake.Calls);
     }
 
     [Fact]

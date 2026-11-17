@@ -11,6 +11,7 @@ public sealed class AppSettings
     public bool CloseToTray { get; set; } = true;
     public bool ShowOsd { get; set; } = true;
     public bool KeepAlive { get; set; } = true;
+    public bool EcoPowerSave { get; set; } = true;
     public int WindowLeft { get; set; } = int.MinValue;
     public int WindowTop { get; set; } = int.MinValue;
 

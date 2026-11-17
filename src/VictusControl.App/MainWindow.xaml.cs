@@ -1,8 +1,6 @@
-using System.Runtime.InteropServices;
 using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Input;
-using System.Windows.Media;
 using VictusControl.Core;
 using WinForms = System.Windows.Forms;
 
@@ -62,7 +60,7 @@ public partial class MainWindow : Window
     {
         bool expanded = ExtraPanel.Visibility == Visibility.Collapsed;
         ExtraPanel.Visibility = expanded ? Visibility.Visible : Visibility.Collapsed;
-        SettingsChevron.Content = expanded ? "\uE70E" : "\uE70D"; // chevron up/down
+        SettingsChevron.Content = expanded ? "\uE70E" : "\uE70D";
     }
 
     private void HideToTray()
@@ -73,7 +71,6 @@ public partial class MainWindow : Window
 
     protected override void OnClosing(System.ComponentModel.CancelEventArgs e)
     {
-        // close button / alt-f4: hide to tray unless the engine is exiting
         if (!_engine.IsExiting && _engine.Settings.CloseToTray)
         {
             e.Cancel = true;
@@ -81,6 +78,7 @@ public partial class MainWindow : Window
             return;
         }
 
+        _fanDebounce.Stop();
         _engine.Settings.WindowLeft = (int)Left;
         _engine.Settings.WindowTop = (int)Top;
         _engine.Settings.Save();
@@ -118,6 +116,12 @@ public partial class MainWindow : Window
             _engine.SetFanMode(FanMode.Auto, 0);
     }
 
+    private void FanCurve_Checked(object sender, RoutedEventArgs e)
+    {
+        if (!_suppress)
+            _engine.SetFanMode(FanMode.Curve, 0);
+    }
+
     private void FanMax_Checked(object sender, RoutedEventArgs e)
     {
         if (!_suppress)
@@ -126,7 +130,6 @@ public partial class MainWindow : Window
 
     private void FanSlider_Changed(object sender, RoutedPropertyChangedEventArgs<double> e)
     {
-        // ValueChanged fires during XAML parse before FanPercent exists
         if (FanPercent is null)
             return;
         FanPercent.Text = $"{(int)FanSlider.Value}%";
@@ -144,6 +147,12 @@ public partial class MainWindow : Window
     private void Discrete_Click(object sender, RoutedEventArgs e) => _engine.RequestGpuMode(GpuMode.Discrete);
 
     // ---- settings ----------------------------------------------------------
+
+    private void EcoSave_Changed(object sender, RoutedEventArgs e)
+    {
+        if (!_suppress)
+            _engine.SetEcoPowerSave(EcoSaveToggle.IsChecked == true);
+    }
 
     private void Osd_Changed(object sender, RoutedEventArgs e)
     {
@@ -205,19 +214,24 @@ public partial class MainWindow : Window
         PerfPill.IsChecked = hw && current == PowerProfile.Performance;
         EcoPill.IsEnabled = BalancedPill.IsEnabled = PerfPill.IsEnabled = hw;
 
-        FanSection.Visibility = hw && (_engine.Caps.FanLevels || _engine.Caps.MaxFan)
+        bool hasFans = hw && (_engine.Caps.FanLevels || _engine.Caps.MaxFan);
+        FanSection.Visibility = hasFans ? Visibility.Visible : Visibility.Collapsed;
+        FanAutoPill.Visibility = hasFans ? Visibility.Visible : Visibility.Collapsed;
+        FanCurvePill.Visibility = hw && _engine.Caps.FanLevels && _engine.Caps.Temperatures
             ? Visibility.Visible : Visibility.Collapsed;
         FanAutoPill.IsChecked = _engine.FanModeState == FanMode.Auto;
+        FanCurvePill.IsChecked = _engine.FanModeState == FanMode.Curve;
         FanMaxPill.IsChecked = _engine.FanModeState == FanMode.Max;
-        if (FanAutoPill.IsChecked != true && FanMaxPill.IsChecked != true)
-        {
-            // manual: the slider itself signals it; highlight none of the pills
-        }
-        FanAutoPill.Visibility = _engine.Caps.MaxFan ? Visibility.Visible : Visibility.Collapsed;
-        if (_engine.FanModeState == FanMode.Manual && _engine.FanManualPercent is > 0)
+
+        if (_engine.FanModeState == FanMode.Manual && _engine.FanManualPercent > 0)
             FanSlider.Value = Math.Min(_engine.FanManualPercent, 100);
+        else if (_engine.FanModeState == FanMode.Curve && _engine.CurveCurrentPercent > 0)
+            FanSlider.Value = Math.Min(_engine.CurveCurrentPercent, 100);
+
         FanSlider.IsEnabled = hw && _engine.Caps.FanLevels;
 
+        GraphicsSection.Visibility = hw && _engine.Caps.GpuModeSwitch
+            ? Visibility.Visible : Visibility.Collapsed;
         GpuMode? gpu = _engine.CurrentGpuMode;
         HybridPill.IsChecked = gpu == GpuMode.Hybrid;
         DiscretePill.IsChecked = gpu == GpuMode.Discrete;
@@ -228,6 +242,7 @@ public partial class MainWindow : Window
             null => "reading… · applies after reboot",
         };
 
+        EcoSaveToggle.IsChecked = _engine.Settings.EcoPowerSave;
         OsdToggle.IsChecked = _engine.Settings.ShowOsd;
         KeepAliveToggle.IsChecked = _engine.Settings.KeepAlive;
         AutostartToggle.IsChecked = _engine.AutostartEnabled;
@@ -236,7 +251,6 @@ public partial class MainWindow : Window
 
         _suppress = false;
 
-        // recolor the active profile pill by mode (eco green / balanced cyan / perf red)
         System.Windows.Media.Brush accent = current switch
         {
             PowerProfile.Eco => (System.Windows.Media.Brush)FindResource("Eco"),
@@ -249,15 +263,16 @@ public partial class MainWindow : Window
 
         if (_engine.LastSensors is { Success: true } s)
         {
-            HeaderStatus.Text = $"CPU {s.CpuTemp}°  GPU {s.GpuTemp}°";
+            string gpuPart = s.GpuSleepingInEco ? "dGPU sleep" : $"GPU {s.GpuTemp}°";
+            string wattPart = s.BatteryWatts is double w ? $"  {w:+0.0;-0.0;0.0} W" : "";
+            HeaderStatus.Text = $"CPU {s.CpuTemp}°  {gpuPart}{wattPart}";
             FanReadout.Text = s.Fan1Rpm > 0 ? $"{s.Fan1Rpm}/{s.Fan2Rpm} RPM" : "";
         }
         FooterNote.Text = hw
-            ? $"Thermal policy {_engine.Caps.Policy?.ToString() ?? "unknown"} · Fn+P cycles modes"
+            ? $"Policy {_engine.Caps.Policy?.ToString() ?? "unknown"} · Fn+P cycles modes"
             : $"Not supported: {_engine.HardwareError}";
     }
 
-    // pill template hides its Root; nudge the fill through the visual tree
     private void SetActivePillFill(System.Windows.Controls.RadioButton pill, bool active, System.Windows.Media.Brush accent)
     {
         if (pill.Template?.FindName("Root", pill) is Border root)

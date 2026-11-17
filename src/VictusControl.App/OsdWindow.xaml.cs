@@ -30,8 +30,9 @@ public partial class OsdWindow : Window
     {
         // show on the screen the user is looking at, not blindly on the primary
         var area = System.Windows.Forms.Screen.FromPoint(System.Windows.Forms.Cursor.Position).WorkingArea;
+        using var graphics = System.Drawing.Graphics.FromHwnd(IntPtr.Zero);
         Left = area.X + (area.Width - ActualWidth) / 2;
-        Top = area.Y + 90 * (Graphics.FromHwnd(IntPtr.Zero).DpiX / 96.0);
+        Top = area.Y + 90 * (graphics.DpiX / 96.0);
     }
 
     protected override void OnSourceInitialized(EventArgs e)
@@ -80,4 +81,3 @@ public partial class OsdWindow : Window
     [DllImport("user32.dll")]
     private static extern int SetWindowLong(IntPtr hWnd, int index, int style);
 }
-
